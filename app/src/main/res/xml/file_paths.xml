@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="export_cache" path="exports/" />
+    <cache-path name="share_cache" path="shares/" />
+    <files-path name="export_files" path="snapshots/" />
+    <files-path name="vault_attachments" path="vault_attachments/" />
+</paths>

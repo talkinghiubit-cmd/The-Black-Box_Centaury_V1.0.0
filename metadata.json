@@ -1,0 +1,6 @@
+{
+  "name": "The Black-Box",
+  "description": "End-to-end encrypted offline vault for passwords, secure notes, and personal data with biometric authentication and self-decrypting HTML backup.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

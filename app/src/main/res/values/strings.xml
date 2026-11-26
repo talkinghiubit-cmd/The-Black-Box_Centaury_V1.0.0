@@ -1,0 +1,40 @@
+<resources>
+    <string name="app_name">The Black-Box</string>
+    <string name="app_brand_upper">THE BLACK-BOX</string>
+    <string name="app_tagline">AES-256-GCM • OFFLINE ENCRYPTED</string>
+    <string name="vault_locked_badge">AES-256-GCM • VAULT LOCKED</string>
+    <string name="strictly_offline_footer">STRICTLY OFFLINE • ZERO CLOUD TELEMETRY</string>
+    <string name="initializing_enclave">INITIALIZING SECURE ENCLAVE...</string>
+    <string name="setup_vault_title">INITIALIZE THE BLACK-BOX</string>
+    <string name="setup_vault_subtitle">Create your Master Password. Everything stored in this vault is encrypted on-device using 256-bit AES-GCM.</string>
+    <string name="setup_zero_knowledge_notice">Zero-Knowledge: Your password is never stored or transmitted. Memorize it securely.</string>
+    <string name="unlock_vault_cta">UNLOCK VAULT</string>
+    <string name="initialize_vault_cta">INITIALIZE SECURE VAULT</string>
+    <string name="biometric_prompt_title">The Black-Box Security</string>
+    <string name="biometric_prompt_negative">Use Master Password</string>
+
+    <!-- Android Autofill Service -->
+    <string name="autofill_service_label">The Black-Box Autofill</string>
+    <string name="autofill_auth_prompt">Unlock The Black-Box to Autofill</string>
+    <string name="autofill_settings_title">ANDROID AUTOFILL SERVICE</string>
+    <string name="autofill_settings_desc">Fill encrypted logins directly inside Chrome and Android apps without copying to the clipboard.</string>
+    <string name="autofill_enable_cta">Enable Autofill</string>
+    <string name="autofill_chrome_cta">Chrome Settings</string>
+
+    <!-- Google Play Privacy Policy & Data Safety -->
+    <string name="privacy_policy_url">https://blackboxvault.app/privacy</string>
+    <string name="privacy_notice_link">Privacy &amp; Data Safety Notice</string>
+    <string name="privacy_dialog_title">PRIVACY &amp; DATA SAFETY</string>
+    <string name="privacy_dialog_subtitle">Zero-knowledge local architecture verified for Google Play Data Safety.</string>
+    <string name="privacy_local_title">1. On-Device Encrypted Storage</string>
+    <string name="privacy_local_body">All passwords, notes, cards, keys, and attachments are encrypted locally with AES-256-GCM (PBKDF2-HMAC-SHA256, 100,000 iterations) and stored solely in local Room SQLite. Android cloud backup and device-to-device transfer are disabled (allowBackup=false).</string>
+    <string name="privacy_voice_title">2. Microphone (RECORD_AUDIO)</string>
+    <string name="privacy_voice_body">Used strictly when you opt in to Voice Biometric unlock. Audio is processed in RAM for 42-D MFCC and pitch verification, then immediately discarded—never saved to disk or transmitted off-device.</string>
+    <string name="privacy_hibp_title">3. Network (HaveIBeenPwned k-Anonymity)</string>
+    <string name="privacy_hibp_body">Network access runs only when you trigger a breach audit. Only the first 5 characters of a password\'s SHA-1 hash are sent to api.pwnedpasswords.com with Add-Padding enabled. Full hashes and plaintext passwords never leave your device, and cached ranges work offline.</string>
+    <string name="privacy_autofill_title">4. Android Autofill Service (Opt-In)</string>
+    <string name="privacy_autofill_body">When enabled by you in System Settings, Autofill reads screen field hints locally to match stored credentials and requires vault authentication whenever the vault is locked.</string>
+    <string name="privacy_hosted_policy_label">HOSTED PRIVACY POLICY URL (PLAY CONSOLE)</string>
+    <string name="privacy_open_url_cta">Open Policy</string>
+    <string name="privacy_copy_url_cta">Copy URL</string>
+</resources>
