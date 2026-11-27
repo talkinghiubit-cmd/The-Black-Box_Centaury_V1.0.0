@@ -1313,8 +1313,454 @@ class ExampleRobolectricTest {
         assertTrue(context.getString(R.string.privacy_hibp_body).contains("5 characters"))
         assertEquals("The Black-Box Autofill", context.getString(R.string.autofill_service_label))
     }
+
+    @Test
+    fun `test UnlockBackoffManager resists wall-clock forward bypass and backward rollback trap`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = context.getSharedPreferences("test_clock_tamper_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+
+        var wallNow = 10_000_000L
+        var elapsedNow = 500_000L
+        val manager = com.example.security.UnlockBackoffManager(
+            prefs = prefs,
+            clock = { wallNow },
+            elapsedClock = { elapsedNow }
+        )
+
+        repeat(5) { manager.recordFailure() }
+        assertEquals(30, manager.getState().lockoutRemainingSeconds)
+
+        // Attack 1: Roll wall clock forward by 1 hour without advancing monotonic clock -> lockout remains enforced
+        wallNow += 3_600_000L
+        val afterForwardTamper = manager.getState()
+        assertTrue(afterForwardTamper.isLockedOut)
+        assertEquals(30, afterForwardTamper.lockoutRemainingSeconds)
+
+        // Attack 2: Roll wall clock backward by 1 year -> remaining seconds must stay clamped to <= 30s
+        wallNow = 1_000L
+        val afterBackwardTamper = manager.getState()
+        assertTrue(afterBackwardTamper.isLockedOut)
+        assertEquals(30, afterBackwardTamper.lockoutRemainingSeconds)
+
+        // Advance monotonic clock past 30s -> lockout expires deterministically
+        elapsedNow += 31_000L
+        assertFalse(manager.getState().isLockedOut)
+    }
+
+    @Test
+    fun `test AutofillVaultSession enforces defeasible idle TTL and strips TOTP secrets`() {
+        val prevClock = com.example.autofill.AutofillVaultSession.clockProvider
+        try {
+            var fakeElapsed = 1_000_000L
+            com.example.autofill.AutofillVaultSession.clockProvider = { fakeElapsed }
+            com.example.autofill.AutofillVaultSession.clear()
+
+            val login = VaultItem(
+                id = "ttl-1",
+                title = "Corporate SSO",
+                category = VaultCategory.LOGIN,
+                username = "exec@corp.com",
+                password = "CorpPassword!99",
+                totpSecret = "JBSWY3DPEHPK3PXP",
+                notes = "Sensitive notes"
+            )
+            com.example.autofill.AutofillVaultSession.updateUnlockedItems(
+                items = listOf(login),
+                isDuress = false,
+                autoLockMinutes = 2
+            )
+            assertTrue(com.example.autofill.AutofillVaultSession.isUnlocked())
+            val cached = com.example.autofill.AutofillVaultSession.getUnlockedLogins().single()
+            assertEquals("", cached.totpSecret)
+            assertEquals("", cached.notes)
+
+            // Touching before expiry extends the session
+            fakeElapsed += 90_000L
+            assertTrue(com.example.autofill.AutofillVaultSession.isUnlocked())
+            com.example.autofill.AutofillVaultSession.touchSession()
+
+            // Exceeding 2-minute TTL auto-defeats trust and clears RAM
+            fakeElapsed += 121_000L
+            assertFalse(com.example.autofill.AutofillVaultSession.isUnlocked())
+            assertTrue(com.example.autofill.AutofillVaultSession.getUnlockedLogins().isEmpty())
+        } finally {
+            com.example.autofill.AutofillVaultSession.clear()
+            com.example.autofill.AutofillVaultSession.clockProvider = prevClock
+        }
+    }
+
+    @Test
+    fun `test BlackBoxSecurity fail-closed GCM bounds and AttachmentStorageManager path confinement`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val key = BlackBoxSecurity.deriveMasterKey("BoundsTest!2026".toCharArray(), BlackBoxSecurity.generateRandomSalt())
+
+        // Short IV or ciphertext must fail closed before Cipher.doFinal
+        var caughtInvalidIv = false
+        try {
+            BlackBoxSecurity.decryptFileBytes(ByteArray(32), ByteArray(4), key)
+        } catch (_: IllegalArgumentException) {
+            caughtInvalidIv = true
+        }
+        assertTrue(caughtInvalidIv)
+
+        // Path traversal must be rejected
+        val traversalRead = com.example.security.AttachmentStorageManager.readDecryptedFile(
+            context = context,
+            relPath = "../shared_prefs/blackbox_auth_guard.xml",
+            secretKey = key
+        )
+        assertEquals(null, traversalRead)
+
+        // Room DB stays at version 6 cleanly
+        val db = BlackBoxDatabase.getDatabase(context)
+        assertEquals(6, db.openHelper.readableDatabase.version)
+    }
+
+    @Test
+    fun `test VaultViewModel monitorAppLifecycle locks vault on background and requires biometric reauth on resume`() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val db = BlackBoxDatabase.getDatabase(app)
+        db.vaultDao().deleteAllRecords()
+        db.metadataDao().deleteMetadata()
+
+        // Seed initialized vault with biometrics enabled in metadata (Robolectric JVM has no AndroidKeyStore)
+        val repo = com.example.data.VaultRepository(db.vaultDao(), db.passwordDao(), db.secureNoteDao())
+        repo.initializeVault("LifecycleBio#2026", enableBiometrics = false)
+        val seededMeta = db.metadataDao().getMetadata()!!.copy(isBiometricEnabled = true)
+        db.metadataDao().insertMetadata(seededMeta)
+
+        val viewModel = com.example.ui.VaultViewModel(app)
+        val mainLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+
+        repeat(40) {
+            mainLooper.idle()
+            if (viewModel.uiState.value.isInitialized && !viewModel.uiState.value.isLoading) return@repeat
+            kotlinx.coroutines.delay(25)
+        }
+        assertTrue(viewModel.uiState.value.isInitialized)
+        assertTrue(viewModel.uiState.value.isBiometricEnabled)
+
+        viewModel.unlockWithPassword("LifecycleBio#2026")
+        repeat(40) {
+            mainLooper.idle()
+            if (viewModel.uiState.value.isUnlocked) return@repeat
+            kotlinx.coroutines.delay(25)
+        }
+        assertTrue("Vault should be unlocked before background transition", viewModel.uiState.value.isUnlocked)
+        assertFalse(viewModel.uiState.value.requiresBiometricReauth)
+
+        var reauthPromptCount = 0
+        var cancelPromptCount = 0
+        val owner = object : androidx.lifecycle.LifecycleOwner {
+            val registry = androidx.lifecycle.LifecycleRegistry(this)
+            override val lifecycle: androidx.lifecycle.Lifecycle get() = registry
+        }
+
+        viewModel.monitorAppLifecycle(
+            lifecycle = owner.lifecycle,
+            biometricManager = null,
+            onRequireBiometricReauth = { reauthPromptCount++ },
+            onCancelBiometricPrompt = { cancelPromptCount++ }
+        )
+
+        // Move through foreground -> pause -> stop (background)
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_CREATE)
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_START)
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_RESUME)
+        assertEquals(0, reauthPromptCount) // Already unlocked, no reauth needed
+
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_PAUSE)
+        assertTrue(viewModel.uiState.value.isSensitiveContentHidden)
+        assertEquals(1, cancelPromptCount)
+
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_STOP)
+        assertFalse(viewModel.uiState.value.isUnlocked)
+        assertTrue(viewModel.uiState.value.isAppInBackground)
+        assertTrue(viewModel.uiState.value.requiresBiometricReauth)
+        assertTrue(viewModel.uiState.value.decryptedItems.isEmpty())
+        assertFalse(com.example.autofill.AutofillVaultSession.isUnlocked())
+
+        // Return to foreground -> requires biometric re-authentication
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_START)
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_RESUME)
+        assertFalse(viewModel.uiState.value.isAppInBackground)
+        assertEquals(1, reauthPromptCount)
+        assertTrue(viewModel.uiState.value.requiresBiometricReauth)
+
+        // Complete unlock -> clears biometric reauth flag
+        viewModel.unlockWithPassword("LifecycleBio#2026")
+        repeat(40) {
+            mainLooper.idle()
+            if (viewModel.uiState.value.isUnlocked) return@repeat
+            kotlinx.coroutines.delay(25)
+        }
+        assertTrue(viewModel.uiState.value.isUnlocked)
+        assertFalse(viewModel.uiState.value.requiresBiometricReauth)
+
+        owner.registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_DESTROY)
+    }
+
+    @Test
+    fun `test AesGcmCryptoEngine binds record metadata with AAD and blocks tampering or downgrade`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = BlackBoxDatabase.getDatabase(context)
+        val repo = com.example.data.VaultRepository(db.vaultDao(), db.passwordDao(), db.secureNoteDao())
+        repo.wipeVault()
+
+        val key = repo.initializeVault("AesGcmAtRest!2026", enableBiometrics = false)
+        val item = VaultItem(
+            id = "aead-rec-1",
+            title = "Private Swiss Custodian",
+            category = VaultCategory.LOGIN,
+            username = "custodian_vip",
+            password = "EntropyPassword#2026!",
+            url = "https://custodian.example.ch",
+            partitionId = VaultPartition.PRIMARY
+        )
+
+        repo.saveItem(item, key, VaultPartition.PRIMARY)
+        val stored = db.vaultDao().getRecordById("aead-rec-1", VaultPartition.PRIMARY)!!
+        assertTrue(stored.encryptedPayload.startsWith(com.example.security.AesGcmCryptoEngine.ENVELOPE_V2_PREFIX))
+
+        // 1. Valid decrypt succeeds
+        val decrypted = BlackBoxSecurity.decryptRecordPayload(
+            id = stored.id,
+            title = stored.title,
+            category = VaultCategory.LOGIN,
+            partitionId = stored.partitionId,
+            encryptedPayload = stored.encryptedPayload,
+            initializationVector = stored.initializationVector,
+            isFavorite = stored.isFavorite,
+            createdAt = stored.createdAt,
+            updatedAt = stored.updatedAt,
+            secretKey = key
+        )
+        assertEquals("EntropyPassword#2026!", decrypted.password)
+
+        // 2. Partition / ID / Category tampering MUST fail AEAD verification
+        var partitionTamperRejected = false
+        try {
+            BlackBoxSecurity.decryptRecordPayload(
+                id = stored.id,
+                title = stored.title,
+                category = VaultCategory.LOGIN,
+                partitionId = VaultPartition.DURESS,
+                encryptedPayload = stored.encryptedPayload,
+                initializationVector = stored.initializationVector,
+                isFavorite = stored.isFavorite,
+                createdAt = stored.createdAt,
+                updatedAt = stored.updatedAt,
+                secretKey = key
+            )
+        } catch (_: javax.crypto.AEADBadTagException) {
+            partitionTamperRejected = true
+        }
+        assertTrue(partitionTamperRejected)
+
+        // 3. Stripping v2: prefix (downgrade attempt) MUST also fail AEAD tag check
+        var downgradeRejected = false
+        try {
+            BlackBoxSecurity.decryptRecordPayload(
+                id = stored.id,
+                title = stored.title,
+                category = VaultCategory.LOGIN,
+                partitionId = stored.partitionId,
+                encryptedPayload = stored.encryptedPayload.removePrefix("v2:"),
+                initializationVector = stored.initializationVector,
+                isFavorite = stored.isFavorite,
+                createdAt = stored.createdAt,
+                updatedAt = stored.updatedAt,
+                secretKey = key
+            )
+        } catch (_: javax.crypto.AEADBadTagException) {
+            downgradeRejected = true
+        }
+        assertTrue(downgradeRejected)
+
+        // 4. Legacy v1 unprefixed record still decrypts cleanly for backward compatibility
+        val legacyJson = BlackBoxSecurity.serializeItemPayload(item)
+        val (legacyCt, legacyIv) = BlackBoxSecurity.encrypt(legacyJson, key)
+        assertFalse(legacyCt.startsWith("v2:"))
+        val legacyRestored = BlackBoxSecurity.decryptRecordPayload(
+            id = item.id,
+            title = item.title,
+            category = item.category,
+            partitionId = VaultPartition.PRIMARY,
+            encryptedPayload = legacyCt,
+            initializationVector = legacyIv,
+            isFavorite = false,
+            createdAt = item.createdAt,
+            updatedAt = item.updatedAt,
+            secretKey = key
+        )
+        assertEquals("EntropyPassword#2026!", legacyRestored.password)
+    }
+
+    @Test
+    fun `test biometric CryptoObject fail-closed and enrollment invalidation cleanup`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = BlackBoxDatabase.getDatabase(context)
+        val repo = com.example.data.VaultRepository(db.vaultDao(), db.passwordDao(), db.secureNoteDao())
+        repo.wipeVault()
+
+        repo.initializeVault("StrongBoxTest#2026", enableBiometrics = false)
+
+        // Seed a legacy unauthenticated blob in metadata to simulate pre-CryptoObject or invalidated state
+        val meta = db.metadataDao().getMetadata()!!
+        db.metadataDao().insertMetadata(
+            meta.copy(
+                isBiometricEnabled = true,
+                biometricWrappedPassword = "legacy_unauthenticated_blob"
+            )
+        )
+
+        // 1. Null cipher MUST fail closed
+        val nullCipherUnlock = repo.unlockWithBiometrics(authenticatedCipher = null)
+        assertEquals(null, nullCipherUnlock)
+
+        var securityThrown = false
+        try {
+            BlackBoxSecurity.unwrapPasswordFromBiometrics("bio_v2:AAAA", authenticatedCipher = null)
+        } catch (_: SecurityException) {
+            securityThrown = true
+        }
+        assertTrue(securityThrown)
+
+        // 2. prepareBiometricUnlockCipher detects legacy/invalidated key and purges enrollment metadata
+        val initResult = repo.prepareBiometricUnlockCipher()
+        assertTrue(initResult is com.example.security.BiometricCipherInitResult.Invalidated)
+        val updatedMeta = db.metadataDao().getMetadata()!!
+        assertFalse(updatedMeta.isBiometricEnabled)
+        assertEquals(null, updatedMeta.biometricWrappedPassword)
+
+        // 3. Explicit RSA-OAEP Cipher roundtrip matches BlackBoxSecurity unwrapping contract
+        val kpg = java.security.KeyPairGenerator.getInstance("RSA")
+        kpg.initialize(2048)
+        val kp = kpg.generateKeyPair()
+        val oaepSpec = javax.crypto.spec.OAEPParameterSpec(
+            "SHA-256",
+            "MGF1",
+            java.security.spec.MGF1ParameterSpec.SHA1,
+            javax.crypto.spec.PSource.PSpecified.DEFAULT
+        )
+        val encCipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+        encCipher.init(javax.crypto.Cipher.ENCRYPT_MODE, kp.public, oaepSpec)
+        val sealed = "bio_v2:" + android.util.Base64.encodeToString(
+            encCipher.doFinal("StrongBoxTest#2026".toByteArray(Charsets.UTF_8)),
+            android.util.Base64.NO_WRAP
+        )
+        val decCipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+        decCipher.init(javax.crypto.Cipher.DECRYPT_MODE, kp.private, oaepSpec)
+        val unwrapped = BlackBoxSecurity.unwrapPasswordFromBiometrics(sealed, decCipher)
+        assertEquals("StrongBoxTest#2026", unwrapped)
+    }
+
+    @Test
+    fun `test ExportFileCleaner purges exports, shares, and snapshots while preserving active share and attachments`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val exportDir = java.io.File(context.cacheDir, "exports").apply { mkdirs() }
+        val shareDir = java.io.File(context.cacheDir, "shares").apply { mkdirs() }
+        val snapshotDir = java.io.File(context.filesDir, "snapshots").apply { mkdirs() }
+        val attachmentDir = java.io.File(context.filesDir, "vault_attachments").apply { mkdirs() }
+
+        val activeHtml = java.io.File(exportDir, "blackbox_vault_active.html").apply {
+            writeText("<html>secret</html>")
+        }
+        val staleHtml = java.io.File(exportDir, "blackbox_vault_stale.html").apply {
+            writeText("<html>stale</html>")
+        }
+        val staleShare = java.io.File(shareDir, "blackbox_secure_share_old.html").apply {
+            writeText("<html>share</html>")
+        }
+        val staleSnapshot = java.io.File(snapshotDir, "blackbox_snapshot_old.blackbox").apply {
+            writeText("{}")
+        }
+        val encryptedAttachment = java.io.File(attachmentDir, "keep-attachment.enc").apply {
+            writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+
+        // While share chooser is active, activeHtml is preserved and stale files are wiped
+        com.example.security.ExportFileCleaner.markShareStarted(activeHtml)
+        val sweptDuringShare = com.example.security.ExportFileCleaner.cleanupIdleExports(context)
+        assertTrue(sweptDuringShare >= 3)
+        assertTrue(activeHtml.exists())
+        assertFalse(staleHtml.exists())
+        assertFalse(staleShare.exists())
+        assertFalse(staleSnapshot.exists())
+        assertTrue("Vault attachments must never be deleted by export cleaner", encryptedAttachment.exists())
+
+        // Once share completes, unconditional cleanup wipes remaining export file
+        com.example.security.ExportFileCleaner.markShareFinished()
+        com.example.security.ExportFileCleaner.cleanupAllExportsUnconditionally(context)
+        assertFalse(activeHtml.exists())
+        assertTrue(encryptedAttachment.exists())
+        encryptedAttachment.delete()
+    }
+
+    @Test
+    fun `test IncognitoKeyboard enforces IME_FLAG_NO_PERSONALIZED_LEARNING`() {
+        val editorInfo = android.view.inputmethod.EditorInfo().apply {
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+        }
+        com.example.ui.components.applyNoPersonalizedLearningFlag(editorInfo)
+
+        assertTrue(
+            (editorInfo.imeOptions and android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) != 0
+        )
+        assertTrue(
+            (editorInfo.imeOptions and android.view.inputmethod.EditorInfo.IME_ACTION_DONE) != 0
+        )
+    }
+
+    @Test
+    fun `test encrypted vault storage and Google Authenticator TOTP validation roundtrip`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = BlackBoxDatabase.getDatabase(context)
+        val repo = com.example.data.VaultRepository(db.vaultDao(), db.passwordDao(), db.secureNoteDao())
+        repo.wipeVault()
+
+        val key = repo.initializeVault("VaultTotpMaster#2026", enableBiometrics = false)
+        val otpAuthUri = "otpauth://totp/AWS:admin@company.io?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=AWS&algorithm=SHA256&digits=8&period=60"
+        val validated = com.example.security.TotpAuthenticatorService.validateSeedInput(otpAuthUri)
+        assertTrue(validated is com.example.security.TotpSeedValidationResult.Valid)
+        val storable = (validated as com.example.security.TotpSeedValidationResult.Valid).storableValue
+
+        val item = VaultItem(
+            id = "aws-totp-1",
+            title = "AWS Root",
+            category = VaultCategory.LOGIN,
+            username = "admin@company.io",
+            password = "StrongAwsPassword#2026",
+            url = "https://console.aws.amazon.com",
+            totpSecret = storable
+        )
+        repo.saveItem(item, key, VaultPartition.PRIMARY)
+
+        val decryptedItems = repo.getAllDecryptedItems(key, VaultPartition.PRIMARY)
+        val restored = decryptedItems.firstOrNull { it.id == "aws-totp-1" }
+        assertNotNull(restored)
+        assertEquals(storable, restored?.totpSecret)
+
+        val token = com.example.security.TotpAuthenticatorService.generateToken(restored!!.totpSecret, timeMillis = 1_700_000_060_000L)
+        assertNotNull(token)
+        assertEquals(8, token?.code?.length)
+        assertEquals(60, token?.periodSeconds)
+        assertEquals(com.example.security.TotpAlgorithm.SHA256, token?.config?.algorithm)
+
+        val verification = com.example.security.TotpAuthenticatorService.verifyCode(
+            storedSeedOrUri = restored.totpSecret,
+            candidateCode = token!!.code,
+            timeMillis = 1_700_000_060_000L
+        )
+        assertTrue(verification.isValid)
+        assertEquals(0, verification.matchedStepOffset)
+
+        // Autofill RAM cache must still strip totpSecret
+        com.example.autofill.AutofillVaultSession.updateUnlockedItems(decryptedItems, isDuress = false)
+        val cached = com.example.autofill.AutofillVaultSession.getUnlockedLogins().firstOrNull { it.id == "aws-totp-1" }
+        assertNotNull(cached)
+        assertEquals("", cached?.totpSecret)
+        com.example.autofill.AutofillVaultSession.clear()
+    }
 }
-
-
-
-

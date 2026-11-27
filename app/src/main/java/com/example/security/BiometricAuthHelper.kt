@@ -18,6 +18,10 @@ object BiometricAuthHelper {
         return BiometricManagerWrapper.getInstance(context).isReady()
     }
 
+    fun isStrongBiometricAvailable(context: Context): Boolean {
+        return BiometricManagerWrapper.getInstance(context).isStrongBiometricReady()
+    }
+
     fun getAvailability(context: Context): BiometricAvailability {
         return BiometricVaultAuthenticator.getInstance(context).checkAvailability()
     }

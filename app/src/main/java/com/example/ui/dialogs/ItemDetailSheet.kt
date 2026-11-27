@@ -23,21 +23,26 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dangerous
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
@@ -49,6 +54,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -63,18 +70,24 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.model.VaultAttachment
 import com.example.model.VaultCategory
 import com.example.model.VaultItem
-import com.example.security.BlackBoxSecurity
+import com.example.security.TotpAuthenticatorService
+import com.example.security.TotpValidationResult
 import com.example.ui.components.CategoryIcon
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.SecurityBadge
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
+import com.example.ui.theme.BlackBoxPitch
 import com.example.ui.theme.BlackBoxSurface
 import com.example.ui.theme.BlackBoxSurfaceVariant
 import com.example.ui.theme.CrimsonAlert
@@ -131,12 +144,15 @@ fun ItemDetailSheet(
         }
     }
 
-    // Live TOTP code
-    val totpCode = remember(item.totpSecret, totpSecondsRemaining) {
+    // Live TOTP token using full Google Authenticator protocol
+    val totpToken = remember(item.totpSecret, totpSecondsRemaining) {
         if (item.totpSecret.isNotBlank()) {
-            BlackBoxSecurity.generateTotpCode(item.totpSecret)
+            TotpAuthenticatorService.generateToken(item.totpSecret)
         } else null
     }
+    var showTotpVerifier by remember(item.id) { mutableStateOf(false) }
+    var candidateTotpInput by remember(item.id) { mutableStateOf("") }
+    var totpVerifyResult by remember(item.id) { mutableStateOf<TotpValidationResult?>(null) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -144,143 +160,300 @@ fun ItemDetailSheet(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp)
-        ) {
-            // Header Bar
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        IncognitoKeyboardArea {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CategoryIcon(category = item.category)
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = item.title,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                        SecurityBadge(text = item.category.displayName.uppercase())
-                    }
-                }
-                Row {
-                    IconButton(onClick = onToggleFavorite, modifier = Modifier.testTag("detail_favorite_button")) {
-                        Icon(
-                            imageVector = if (item.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
-                            contentDescription = "Favorite",
-                            tint = if (item.isFavorite) AmberWarning else TextMuted
-                        )
-                    }
-                    IconButton(onClick = onDismiss, modifier = Modifier.testTag("detail_close_button")) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = TextSecondary
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(18.dp))
-
-            // TOTP 2FA Token Card (if configured)
-            if (totpCode != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(BlackBoxSurfaceVariant)
-                        .border(1.dp, CyanIce.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                        .padding(14.dp)
+                // Header Bar
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CategoryIcon(category = item.category)
+                        Spacer(modifier = Modifier.width(12.dp))
                         Column {
+                            Text(
+                                text = item.title,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            SecurityBadge(text = item.category.displayName.uppercase())
+                        }
+                    }
+                    Row {
+                        IconButton(onClick = onToggleFavorite, modifier = Modifier.testTag("detail_favorite_button")) {
+                            Icon(
+                                imageVector = if (item.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                                contentDescription = "Favorite",
+                                tint = if (item.isFavorite) AmberWarning else TextMuted
+                            )
+                        }
+                        IconButton(onClick = onDismiss, modifier = Modifier.testTag("detail_close_button")) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = TextSecondary
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // TOTP 2FA Token Card (if configured)
+                if (totpToken != null) {
+                    val cfg = totpToken.config
+                    val periodProgress = (totpToken.remainingSeconds.toFloat() / totpToken.periodSeconds.toFloat())
+                        .coerceIn(0f, 1f)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(BlackBoxSurfaceVariant)
+                            .border(1.dp, CyanIce.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                            .padding(14.dp)
+                            .testTag("detail_totp_card")
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Key,
+                                        contentDescription = null,
+                                        tint = CyanIce,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = stringResource(R.string.totp_section_header),
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CyanIce
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = buildString {
+                                        append("${cfg.algorithm.displayName} • ${cfg.digits} digits • ${cfg.periodSeconds}s")
+                                        if (cfg.issuer.isNotBlank()) append(" • ${cfg.issuer}")
+                                    },
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = TextMuted
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = totpToken.formattedCode,
+                                    fontSize = 24.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = TextPrimary,
+                                    letterSpacing = 2.sp,
+                                    modifier = Modifier.testTag("detail_totp_code")
+                                )
+                            }
+
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Circular countdown
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(CircleShape)
+                                        .background(BlackBoxSurface),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        progress = { periodProgress },
+                                        modifier = Modifier.size(38.dp),
+                                        color = if (totpToken.remainingSeconds > 5) CyanIce else CrimsonAlert,
+                                        strokeWidth = 2.5.dp,
+                                        trackColor = TextSecondary.copy(alpha = 0.2f)
+                                    )
+                                    Text(
+                                        text = "${totpToken.remainingSeconds}",
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (totpToken.remainingSeconds > 5) CyanIce else CrimsonAlert
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(4.dp))
+
+                                IconButton(
+                                    onClick = { onCopyText("2FA Code", totpToken.code, true) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("detail_copy_totp_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = "Copy 2FA Code",
+                                        tint = CyanIce,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    showTotpVerifier = !showTotpVerifier
+                                    totpVerifyResult = null
+                                },
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("totp_verify_toggle_button")
+                            ) {
                                 Icon(
-                                    imageVector = Icons.Default.Key,
-                                    contentDescription = null,
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = stringResource(R.string.totp_verify_toggle),
+                                    tint = EmeraldNeon,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = stringResource(R.string.totp_verify_toggle),
+                                    color = EmeraldNeon,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+
+                            TextButton(
+                                onClick = {
+                                    val exportConfig = cfg.copy(
+                                        issuer = cfg.issuer.ifBlank { item.title },
+                                        accountName = cfg.accountName.ifBlank { item.username }
+                                    )
+                                    val uri = TotpAuthenticatorService.buildOtpAuthUri(exportConfig)
+                                    onCopyText("Google Auth URI", uri, true)
+                                },
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("totp_copy_uri_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.QrCode2,
+                                    contentDescription = stringResource(R.string.totp_copy_uri_cta),
                                     tint = CyanIce,
                                     modifier = Modifier.size(16.dp)
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "2FA TOTP AUTHENTICATOR (RFC 6238)",
+                                    text = stringResource(R.string.totp_copy_uri_cta),
+                                    color = CyanIce,
                                     fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    color = CyanIce
+                                    fontFamily = FontFamily.Monospace
                                 )
                             }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            // Format 6 digits with a space in middle e.g. 123 456
-                            val formattedTotp = if (totpCode.length == 6) {
-                                "${totpCode.substring(0, 3)} ${totpCode.substring(3)}"
-                            } else totpCode
-
-                            Text(
-                                text = formattedTotp,
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                color = TextPrimary,
-                                letterSpacing = 2.sp
-                            )
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            // Circular countdown
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(BlackBoxSurface),
-                                contentAlignment = Alignment.Center
+                        if (showTotpVerifier) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                CircularProgressIndicator(
-                                    progress = { totpSecondsRemaining / 30f },
-                                    modifier = Modifier.size(36.dp),
-                                    color = if (totpSecondsRemaining > 5) CyanIce else CrimsonAlert,
-                                    strokeWidth = 2.5.dp,
-                                    trackColor = TextSecondary.copy(alpha = 0.2f)
+                                OutlinedTextField(
+                                    value = candidateTotpInput,
+                                    onValueChange = { raw ->
+                                        candidateTotpInput = raw.filter { it.isDigit() }.take(cfg.digits)
+                                        totpVerifyResult = null
+                                    },
+                                    label = { Text(stringResource(R.string.totp_verify_input_label), fontSize = 11.sp) },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = CyanIce,
+                                        unfocusedBorderColor = BlackBoxBorder,
+                                        focusedContainerColor = BlackBoxPitch,
+                                        unfocusedContainerColor = BlackBoxPitch,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("totp_verify_code_input")
                                 )
-                                Text(
-                                    text = "$totpSecondsRemaining",
-                                    fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (totpSecondsRemaining > 5) CyanIce else CrimsonAlert
-                                )
+
+                                Button(
+                                    onClick = {
+                                        totpVerifyResult = TotpAuthenticatorService.verifyCode(
+                                            storedSeedOrUri = item.totpSecret,
+                                            candidateCode = candidateTotpInput
+                                        )
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = CyanIce,
+                                        contentColor = BlackBoxPitch
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("totp_verify_submit_button")
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.totp_verify_cta),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
                             }
 
-                            Spacer(modifier = Modifier.width(8.dp))
-
-                            IconButton(
-                                onClick = { onCopyText("2FA Code", totpCode, true) },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ContentCopy,
-                                    contentDescription = "Copy 2FA Code",
-                                    tint = CyanIce,
-                                    modifier = Modifier.size(18.dp)
-                                )
+                            totpVerifyResult?.let { res ->
+                                Spacer(modifier = Modifier.height(6.dp))
+                                val badgeColor = if (res.isValid) EmeraldNeon else CrimsonAlert
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(badgeColor.copy(alpha = 0.12f))
+                                        .border(1.dp, badgeColor.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                        .testTag("totp_verify_result_banner")
+                                ) {
+                                    Icon(
+                                        imageVector = if (res.isValid) Icons.Default.CheckCircle else Icons.Default.ErrorOutline,
+                                        contentDescription = res.message,
+                                        tint = badgeColor,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = res.message,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = badgeColor
+                                    )
+                                }
                             }
                         }
                     }
+                    Spacer(modifier = Modifier.height(14.dp))
                 }
-                Spacer(modifier = Modifier.height(14.dp))
-            }
 
             // Category Fields
             when (item.category) {
@@ -648,6 +821,7 @@ fun ItemDetailSheet(
                     Text("Delete")
                 }
             }
+        }
         }
     }
 

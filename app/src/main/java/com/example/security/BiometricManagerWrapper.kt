@@ -227,7 +227,16 @@ class BiometricManagerWrapper private constructor(private val context: Context) 
         val prompt = createBiometricPrompt(activity, callback)
         activePromptRef = WeakReference(prompt)
 
-        prompt.authenticate(promptInfo)
+        try {
+            prompt.authenticate(promptInfo)
+        } catch (e: Exception) {
+            activePromptRef = null
+            callback.onError(
+                BiometricPrompt.ERROR_HW_UNAVAILABLE,
+                e.message ?: "Unable to launch biometric prompt.",
+                isLockout = false
+            )
+        }
         return prompt
     }
 
@@ -246,8 +255,17 @@ class BiometricManagerWrapper private constructor(private val context: Context) 
         val prompt = createBiometricPrompt(activity, callback)
         activePromptRef = WeakReference(prompt)
 
-        val cryptoObject = BiometricPrompt.CryptoObject(cipher)
-        prompt.authenticate(promptInfo, cryptoObject)
+        try {
+            val cryptoObject = BiometricPrompt.CryptoObject(cipher)
+            prompt.authenticate(promptInfo, cryptoObject)
+        } catch (e: Exception) {
+            activePromptRef = null
+            callback.onError(
+                BiometricPrompt.ERROR_HW_UNAVAILABLE,
+                e.message ?: "Unable to launch cryptographic biometric prompt.",
+                isLockout = false
+            )
+        }
         return prompt
     }
 

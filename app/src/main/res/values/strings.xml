@@ -12,6 +12,9 @@
     <string name="initialize_vault_cta">INITIALIZE SECURE VAULT</string>
     <string name="biometric_prompt_title">The Black-Box Security</string>
     <string name="biometric_prompt_negative">Use Master Password</string>
+    <string name="biometric_reauth_required_banner">LOCKED ON BACKGROUND • BIOMETRIC VERIFICATION REQUIRED</string>
+    <string name="biometric_invalidated_error">New biometric enrollment detected. StrongBox key invalidated—unlock with Master Password and re-enable biometrics in Settings.</string>
+    <string name="biometric_strong_required_error">Class 3 Strong biometric hardware is required for cryptographic key authorization. Unlock with Master Password.</string>
 
     <!-- Android Autofill Service -->
     <string name="autofill_service_label">The Black-Box Autofill</string>
@@ -37,4 +40,13 @@
     <string name="privacy_hosted_policy_label">HOSTED PRIVACY POLICY URL (PLAY CONSOLE)</string>
     <string name="privacy_open_url_cta">Open Policy</string>
     <string name="privacy_copy_url_cta">Copy URL</string>
+
+    <!-- Google Authenticator TOTP 2FA -->
+    <string name="totp_section_header">GOOGLE AUTHENTICATOR 2FA (RFC 6238)</string>
+    <string name="totp_input_label">2FA TOTP Secret or otpauth:// URI (Optional)</string>
+    <string name="totp_input_placeholder">Base32 key or otpauth://totp/...</string>
+    <string name="totp_verify_toggle">Verify Code</string>
+    <string name="totp_verify_input_label">Enter 6 or 8-digit code to validate</string>
+    <string name="totp_verify_cta">Validate</string>
+    <string name="totp_copy_uri_cta">Copy URI</string>
 </resources>

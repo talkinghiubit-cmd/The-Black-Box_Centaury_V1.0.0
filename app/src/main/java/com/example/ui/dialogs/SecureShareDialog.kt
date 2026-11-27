@@ -84,6 +84,7 @@ import com.example.security.SecurePasswordGenerator
 import com.example.security.SecureShareManager
 import com.example.security.ShareDuration
 import com.example.ui.components.CategoryIcon
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.SecurityBadge
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
@@ -133,7 +134,8 @@ fun SecureShareDialog(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -545,6 +547,7 @@ fun SecureShareDialog(
                     color = CyanIce
                 )
             }
+        }
         }
     }
 }

@@ -1,25 +1,50 @@
 package com.example.security
 
 import android.net.Uri
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
 import com.example.model.PasswordStrength
 import com.example.model.VaultCategory
 import com.example.model.VaultItem
 import org.json.JSONObject
+import java.security.InvalidKeyException
+import java.security.KeyFactory
+import java.security.KeyPair
+import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.MessageDigest
+import java.security.PrivateKey
+import java.security.ProviderException
+import java.security.PublicKey
 import java.security.SecureRandom
+import java.security.UnrecoverableKeyException
+import java.security.spec.MGF1ParameterSpec
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
-import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.PSource
 import javax.crypto.spec.SecretKeySpec
-import kotlin.math.pow
+
+sealed class BiometricCipherInitResult {
+    data class Ready(
+        val cipher: Cipher,
+        val isStrongBoxBacked: Boolean,
+        val isHardwareBacked: Boolean
+    ) : BiometricCipherInitResult()
+
+    data class Invalidated(val reason: String) : BiometricCipherInitResult()
+    data class Unavailable(val reason: String) : BiometricCipherInitResult()
+}
 
 object BlackBoxSecurity {
 
@@ -32,7 +57,17 @@ object BlackBoxSecurity {
 
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val KEYSTORE_ALIAS_BIOMETRIC = "BlackBoxBiometricKey"
+    private const val KEYSTORE_ALIAS_BIOMETRIC_V2 = "BlackBoxBiometricStrongBoxV2"
+    private const val BIOMETRIC_BLOB_V2_PREFIX = "bio_v2:"
+    private const val RSA_OAEP_TRANSFORMATION = "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
     private const val KEYSTORE_ALIAS_VOICE_BIOMETRIC = "BlackBoxVoiceBiometricKey"
+
+    private val biometricOaepSpec = OAEPParameterSpec(
+        "SHA-256",
+        "MGF1",
+        MGF1ParameterSpec.SHA1,
+        PSource.PSpecified.DEFAULT
+    )
 
     private val secureRandom = SecureRandom()
 
@@ -42,24 +77,28 @@ object BlackBoxSecurity {
         return salt
     }
 
-    fun generateRandomIv(): ByteArray {
-        val iv = ByteArray(GCM_IV_LENGTH_BYTES)
-        secureRandom.nextBytes(iv)
-        return iv
-    }
+    fun generateRandomIv(): ByteArray = AesGcmCryptoEngine.generateIv()
 
     fun deriveMasterKey(password: CharArray, salt: ByteArray): SecretKey {
         val spec = PBEKeySpec(password, salt, PBKDF2_ITERATIONS, KEY_LENGTH_BITS)
-        val factory = SecretKeyFactory.getInstance(PBKDF2_ALGORITHM)
-        val keyBytes = factory.generateSecret(spec).encoded
-        return SecretKeySpec(keyBytes, "AES")
+        return try {
+            val factory = SecretKeyFactory.getInstance(PBKDF2_ALGORITHM)
+            val keyBytes = factory.generateSecret(spec).encoded
+            SecretKeySpec(keyBytes, "AES")
+        } finally {
+            spec.clearPassword()
+        }
     }
 
     fun computeVerificationHash(password: CharArray, salt: ByteArray): String {
         val spec = PBEKeySpec(password, salt, 50_000, 256)
-        val factory = SecretKeyFactory.getInstance(PBKDF2_ALGORITHM)
-        val hashBytes = factory.generateSecret(spec).encoded
-        return Base64.encodeToString(hashBytes, Base64.NO_WRAP)
+        return try {
+            val factory = SecretKeyFactory.getInstance(PBKDF2_ALGORITHM)
+            val hashBytes = factory.generateSecret(spec).encoded
+            Base64.encodeToString(hashBytes, Base64.NO_WRAP)
+        } finally {
+            spec.clearPassword()
+        }
     }
 
     fun verifyPassword(password: CharArray, salt: ByteArray, expectedHash: String): Boolean {
@@ -69,53 +108,96 @@ object BlackBoxSecurity {
 
     /**
      * Encrypts plaintext string using AES-256-GCM.
-     * Returns Pair of (Base64 Ciphertext, Base64 IV).
+     * Returns Pair of (Base64 Ciphertext or v2 envelope, Base64 IV).
      */
-    fun encrypt(plaintext: String, secretKey: SecretKey): Pair<String, String> {
-        val iv = generateRandomIv()
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey, spec)
-        val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        return Pair(
-            Base64.encodeToString(ciphertext, Base64.NO_WRAP),
-            Base64.encodeToString(iv, Base64.NO_WRAP)
-        )
+    fun encrypt(
+        plaintext: String,
+        secretKey: SecretKey,
+        associatedData: ByteArray? = null
+    ): Pair<String, String> {
+        val encrypted = AesGcmCryptoEngine.encryptString(plaintext, secretKey, associatedData)
+        return Pair(encrypted.ciphertext, encrypted.iv)
     }
 
     /**
-     * Decrypts Base64 ciphertext with Base64 IV using AES-256-GCM.
+     * Decrypts Base64 ciphertext (or v2 AAD envelope) with Base64 IV using AES-256-GCM.
      */
-    fun decrypt(base64Ciphertext: String, base64Iv: String, secretKey: SecretKey): String {
-        val ciphertext = Base64.decode(base64Ciphertext, Base64.NO_WRAP)
-        val iv = Base64.decode(base64Iv, Base64.NO_WRAP)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
-        val decryptedBytes = cipher.doFinal(ciphertext)
-        return String(decryptedBytes, Charsets.UTF_8)
+    fun decrypt(
+        base64Ciphertext: String,
+        base64Iv: String,
+        secretKey: SecretKey,
+        associatedData: ByteArray? = null
+    ): String {
+        return AesGcmCryptoEngine.decryptString(base64Ciphertext, base64Iv, secretKey, associatedData)
+    }
+
+    /**
+     * Encrypts a [VaultItem] at rest using AES-256-GCM with canonical AAD binding
+     * (record ID, partition ID, and category).
+     */
+    fun encryptRecordPayload(
+        item: VaultItem,
+        secretKey: SecretKey,
+        partitionId: Int = item.partitionId
+    ): Pair<String, String> {
+        val payload = serializeItemPayload(item.copy(partitionId = partitionId))
+        val aad = AesGcmCryptoEngine.buildRecordAad(item.id, partitionId, item.category.name)
+        return encrypt(payload, secretKey, aad)
+    }
+
+    /**
+     * Decrypts a stored vault record payload and verifies canonical AAD & partition isolation.
+     */
+    fun decryptRecordPayload(
+        id: String,
+        title: String,
+        category: VaultCategory,
+        partitionId: Int,
+        encryptedPayload: String,
+        initializationVector: String,
+        isFavorite: Boolean,
+        createdAt: Long,
+        updatedAt: Long,
+        secretKey: SecretKey
+    ): VaultItem {
+        val aad = AesGcmCryptoEngine.buildRecordAad(id, partitionId, category.name)
+        val decryptedJson = decrypt(encryptedPayload, initializationVector, secretKey, aad)
+        val item = deserializeItemPayload(
+            id = id,
+            title = title,
+            category = category,
+            isFavorite = isFavorite,
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            jsonString = decryptedJson
+        )
+        require(item.partitionId == partitionId) {
+            "Partition isolation violation detected for record $id"
+        }
+        return item
     }
 
     /**
      * Raw byte encryption for files and attachments using AES-256-GCM.
      */
-    fun encryptFileBytes(bytes: ByteArray, secretKey: SecretKey): Pair<ByteArray, ByteArray> {
-        val iv = generateRandomIv()
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey, spec)
-        val ciphertext = cipher.doFinal(bytes)
-        return Pair(ciphertext, iv)
+    fun encryptFileBytes(
+        bytes: ByteArray,
+        secretKey: SecretKey,
+        associatedData: ByteArray? = null
+    ): Pair<ByteArray, ByteArray> {
+        return AesGcmCryptoEngine.encryptBytes(bytes, secretKey, associatedData)
     }
 
     /**
      * Raw byte decryption for files and attachments using AES-256-GCM.
      */
-    fun decryptFileBytes(ciphertext: ByteArray, iv: ByteArray, secretKey: SecretKey): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
-        return cipher.doFinal(ciphertext)
+    fun decryptFileBytes(
+        ciphertext: ByteArray,
+        iv: ByteArray,
+        secretKey: SecretKey,
+        associatedData: ByteArray? = null
+    ): ByteArray {
+        return AesGcmCryptoEngine.decryptBytes(ciphertext, iv, secretKey, associatedData)
     }
 
     // Serializes sensitive fields of VaultItem to JSON string for encryption
@@ -263,45 +345,192 @@ object BlackBoxSecurity {
         return result.take(length).joinToString("")
     }
 
-    // Hardware Keystore support for biometric master-key wrapping
-    private fun getOrCreateBiometricKeystoreKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        if (!keyStore.containsAlias(KEYSTORE_ALIAS_BIOMETRIC)) {
-            val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-            val spec = KeyGenParameterSpec.Builder(
-                KEYSTORE_ALIAS_BIOMETRIC,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-            keyGenerator.init(spec)
-            return keyGenerator.generateKey()
+    // Hardware Keystore (StrongBox + TEE fallback) with biometric enrollment invalidation
+    // and strict per-operation BiometricPrompt.CryptoObject enforcement.
+    private fun buildBiometricKeyGenSpec(useStrongBox: Boolean): KeyGenParameterSpec {
+        val builder = KeyGenParameterSpec.Builder(
+            KEYSTORE_ALIAS_BIOMETRIC_V2,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setKeySize(2048)
+            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+            .setUserAuthenticationRequired(true)
+            .setInvalidatedByBiometricEnrollment(true)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+        } else {
+            @Suppress("DEPRECATION")
+            builder.setUserAuthenticationValidityDurationSeconds(-1)
         }
-        return (keyStore.getEntry(KEYSTORE_ALIAS_BIOMETRIC, null) as KeyStore.SecretKeyEntry).secretKey
+
+        if (useStrongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setIsStrongBoxBacked(true)
+        }
+        return builder.build()
+    }
+
+    private fun isBiometricKeyStillValid(privateKey: PrivateKey): Boolean {
+        return try {
+            val probe = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
+            probe.init(Cipher.DECRYPT_MODE, privateKey, biometricOaepSpec)
+            true
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            false
+        } catch (_: UnrecoverableKeyException) {
+            false
+        } catch (_: InvalidKeyException) {
+            false
+        }
+    }
+
+    private fun getOrCreateBiometricKeyPair(): KeyPair {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        if (keyStore.containsAlias(KEYSTORE_ALIAS_BIOMETRIC_V2)) {
+            val entry = runCatching {
+                keyStore.getEntry(KEYSTORE_ALIAS_BIOMETRIC_V2, null) as? KeyStore.PrivateKeyEntry
+            }.getOrNull()
+            if (entry != null && isBiometricKeyStillValid(entry.privateKey)) {
+                return KeyPair(entry.certificate.publicKey, entry.privateKey)
+            }
+            runCatching { keyStore.deleteEntry(KEYSTORE_ALIAS_BIOMETRIC_V2) }
+        }
+
+        val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                kpg.initialize(buildBiometricKeyGenSpec(useStrongBox = true))
+                return kpg.generateKeyPair()
+            } catch (_: StrongBoxUnavailableException) {
+                // Device lacks StrongBox HSM; gracefully fall back to TEE hardware Keystore
+            } catch (_: ProviderException) {
+                // Some OEMs wrap StrongBox unavailability inside ProviderException
+            }
+        }
+        kpg.initialize(buildBiometricKeyGenSpec(useStrongBox = false))
+        return kpg.generateKeyPair()
+    }
+
+    fun deleteBiometricKeystoreKey() {
+        runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            if (keyStore.containsAlias(KEYSTORE_ALIAS_BIOMETRIC_V2)) {
+                keyStore.deleteEntry(KEYSTORE_ALIAS_BIOMETRIC_V2)
+            }
+            if (keyStore.containsAlias(KEYSTORE_ALIAS_BIOMETRIC)) {
+                keyStore.deleteEntry(KEYSTORE_ALIAS_BIOMETRIC)
+            }
+        }
+    }
+
+    fun isBiometricKeyStrongBoxBacked(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        return runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val key = keyStore.getKey(KEYSTORE_ALIAS_BIOMETRIC_V2, null) as? PrivateKey ?: return false
+            val keyFactory = KeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+            val keyInfo = keyFactory.getKeySpec(key, KeyInfo::class.java)
+            keyInfo.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
+        }.getOrDefault(false)
     }
 
     fun wrapPasswordForBiometrics(masterPassword: String): String {
-        val key = getOrCreateBiometricKeystoreKey()
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        val iv = cipher.iv
-        val encrypted = cipher.doFinal(masterPassword.toByteArray(Charsets.UTF_8))
-        val combined = iv + encrypted
-        return Base64.encodeToString(combined, Base64.NO_WRAP)
+        val publicKey: PublicKey = getOrCreateBiometricKeyPair().public
+        val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, publicKey, biometricOaepSpec)
+        val passwordBytes = masterPassword.toByteArray(Charsets.UTF_8)
+        return try {
+            val encrypted = cipher.doFinal(passwordBytes)
+            "$BIOMETRIC_BLOB_V2_PREFIX${Base64.encodeToString(encrypted, Base64.NO_WRAP)}"
+        } finally {
+            passwordBytes.fill(0)
+        }
     }
 
-    fun unwrapPasswordFromBiometrics(wrappedBase64: String): String {
-        val combined = Base64.decode(wrappedBase64, Base64.NO_WRAP)
-        val iv = combined.copyOfRange(0, 12)
-        val encrypted = combined.copyOfRange(12, combined.size)
-        val key = getOrCreateBiometricKeystoreKey()
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
-        cipher.init(Cipher.DECRYPT_MODE, key, spec)
-        val decrypted = cipher.doFinal(encrypted)
-        return String(decrypted, Charsets.UTF_8)
+    fun prepareBiometricDecryptCipher(wrappedBase64: String?): BiometricCipherInitResult {
+        if (wrappedBase64.isNullOrBlank()) {
+            return BiometricCipherInitResult.Unavailable("No biometric credential wrapped.")
+        }
+        if (!wrappedBase64.startsWith(BIOMETRIC_BLOB_V2_PREFIX)) {
+            return BiometricCipherInitResult.Invalidated(
+                "Biometric vault key upgraded to StrongBox CryptoObject. Unlock with Master Password and re-enable biometrics."
+            )
+        }
+
+        return try {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val privateKey = keyStore.getKey(KEYSTORE_ALIAS_BIOMETRIC_V2, null) as? PrivateKey
+                ?: return BiometricCipherInitResult.Invalidated(
+                    "Hardware biometric key missing or purged. Master Password verification required."
+                )
+
+            var isStrongBoxBacked = false
+            var isHardwareBacked = false
+            runCatching {
+                val keyFactory = KeyFactory.getInstance(privateKey.algorithm, ANDROID_KEYSTORE)
+                val keyInfo = keyFactory.getKeySpec(privateKey, KeyInfo::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    isStrongBoxBacked = keyInfo.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
+                    isHardwareBacked = isStrongBoxBacked ||
+                        keyInfo.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
+                } else {
+                    @Suppress("DEPRECATION")
+                    isHardwareBacked = keyInfo.isInsideSecureHardware
+                }
+            }
+
+            val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, privateKey, biometricOaepSpec)
+            BiometricCipherInitResult.Ready(
+                cipher = cipher,
+                isStrongBoxBacked = isStrongBoxBacked,
+                isHardwareBacked = isHardwareBacked
+            )
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            BiometricCipherInitResult.Invalidated(
+                "New biometric enrollment detected. Hardware key invalidated for your protection."
+            )
+        } catch (e: UnrecoverableKeyException) {
+            BiometricCipherInitResult.Invalidated(
+                "Biometric key invalidated (${e.message ?: "enrollment changed"}). Master Password required."
+            )
+        } catch (e: InvalidKeyException) {
+            BiometricCipherInitResult.Invalidated(
+                "Biometric key invalidated (${e.message ?: "key mismatch"}). Master Password required."
+            )
+        } catch (e: KeyStoreException) {
+            BiometricCipherInitResult.Unavailable(
+                "Hardware Keystore unavailable: ${e.message ?: "unknown error"}"
+            )
+        } catch (e: Exception) {
+            BiometricCipherInitResult.Unavailable(
+                "Unable to initialize biometric Cipher: ${e.message ?: "unknown error"}"
+            )
+        }
+    }
+
+    fun unwrapPasswordFromBiometrics(
+        wrappedBase64: String,
+        authenticatedCipher: Cipher?
+    ): String {
+        if (authenticatedCipher == null) {
+            throw SecurityException("Authenticated BiometricPrompt.CryptoObject Cipher is required.")
+        }
+        if (!wrappedBase64.startsWith(BIOMETRIC_BLOB_V2_PREFIX)) {
+            throw SecurityException("Legacy unauthenticated biometric blob rejected.")
+        }
+        val encrypted = Base64.decode(
+            wrappedBase64.removePrefix(BIOMETRIC_BLOB_V2_PREFIX),
+            Base64.NO_WRAP
+        )
+        require(encrypted.isNotEmpty()) { "Malformed biometric wrapped blob" }
+        val decrypted = authenticatedCipher.doFinal(encrypted)
+        return try {
+            String(decrypted, Charsets.UTF_8)
+        } finally {
+            decrypted.fill(0)
+        }
     }
 
     // Hardware Keystore support for Voice Biometric template & credential wrapping
@@ -335,8 +564,9 @@ object BlackBoxSecurity {
 
     fun unwrapVoiceData(wrappedBase64: String): String {
         val combined = Base64.decode(wrappedBase64, Base64.NO_WRAP)
-        val iv = combined.copyOfRange(0, 12)
-        val encrypted = combined.copyOfRange(12, combined.size)
+        require(combined.size >= GCM_IV_LENGTH_BYTES + GCM_TAG_LENGTH_BITS / 8) { "Malformed voice wrapped blob" }
+        val iv = combined.copyOfRange(0, GCM_IV_LENGTH_BYTES)
+        val encrypted = combined.copyOfRange(GCM_IV_LENGTH_BYTES, combined.size)
         val key = getOrCreateVoiceBiometricKeystoreKey()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
@@ -346,28 +576,11 @@ object BlackBoxSecurity {
     }
 
     // =========================================================================
-    // RFC 6238 TOTP 2FA Authenticator Engine
+    // RFC 6238 TOTP 2FA Authenticator Engine (delegates to TotpAuthenticatorService)
     // =========================================================================
 
-    private val BASE32_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-
     fun decodeBase32(base32: String): ByteArray {
-        val clean = base32.trim().replace(" ", "").replace("-", "").uppercase()
-        val bytes = mutableListOf<Byte>()
-        var buffer = 0
-        var bitsLeft = 0
-
-        for (c in clean) {
-            val value = BASE32_CHARS.indexOf(c)
-            if (value < 0) continue // Skip invalid or padding chars '='
-            buffer = (buffer shl 5) or value
-            bitsLeft += 5
-            if (bitsLeft >= 8) {
-                bytes.add(((buffer shr (bitsLeft - 8)) and 0xFF).toByte())
-                bitsLeft -= 8
-            }
-        }
-        return bytes.toByteArray()
+        return TotpAuthenticatorService.decodeBase32Strict(base32, minBytes = 1) ?: ByteArray(0)
     }
 
     fun generateTotpCode(
@@ -377,62 +590,25 @@ object BlackBoxSecurity {
         periodSeconds: Int = 30
     ): String? {
         if (secretBase32.isBlank()) return null
-        return try {
-            val keyBytes = decodeBase32(secretBase32)
-            if (keyBytes.isEmpty()) return null
-
-            val timeStep = timeMillis / 1000L / periodSeconds
-
-            // 8-byte big-endian time step counter
-            val data = ByteArray(8)
-            var temp = timeStep
-            for (i in 7 downTo 0) {
-                data[i] = (temp and 0xFF).toByte()
-                temp = temp shr 8
-            }
-
-            val mac = Mac.getInstance("HmacSHA1")
-            val keySpec = SecretKeySpec(keyBytes, "RAW")
-            mac.init(keySpec)
-            val hmac = mac.doFinal(data)
-
-            // Dynamic truncation (RFC 4226)
-            val offset = (hmac[hmac.size - 1].toInt() and 0x0F)
-            val binary = ((hmac[offset].toInt() and 0x7F) shl 24) or
-                    ((hmac[offset + 1].toInt() and 0xFF) shl 16) or
-                    ((hmac[offset + 2].toInt() and 0xFF) shl 8) or
-                    (hmac[offset + 3].toInt() and 0xFF)
-
-            val divisor = 10.0.pow(digits.toDouble()).toInt()
-            val otp = binary % divisor
-            String.format("%0${digits}d", otp)
-        } catch (e: Exception) {
-            null
+        return if (secretBase32.trim().startsWith("otpauth://", ignoreCase = true)) {
+            TotpAuthenticatorService.generateCode(secretBase32, timeMillis)
+        } else {
+            TotpAuthenticatorService.generateCode(
+                storedSeedOrUri = secretBase32,
+                timeMillis = timeMillis,
+                digitsOverride = digits,
+                periodSecondsOverride = periodSeconds
+            )
         }
     }
 
     fun getTotpRemainingSeconds(periodSeconds: Int = 30): Int {
-        val currentSec = (System.currentTimeMillis() / 1000L).toInt()
-        val elapsed = currentSec % periodSeconds
-        return periodSeconds - elapsed
+        return TotpAuthenticatorService.getRemainingSeconds(periodSeconds)
     }
 
     fun parseTotpUri(uriString: String): Pair<String, String>? {
-        val trimmed = uriString.trim()
-        if (!trimmed.startsWith("otpauth://", ignoreCase = true)) return null
-        return try {
-            val queryPart = trimmed.substringAfter("?", "")
-            val params = queryPart.split("&").mapNotNull {
-                val idx = it.indexOf("=")
-                if (idx > 0) it.substring(0, idx) to it.substring(idx + 1) else null
-            }.toMap()
-
-            val secret = params["secret"] ?: return null
-            val rawLabel = trimmed.substringAfter("otpauth://totp/").substringBefore("?")
-            val issuer = params["issuer"] ?: rawLabel
-            Pair(secret, issuer)
-        } catch (e: Exception) {
-            null
+        return TotpAuthenticatorService.parseOtpAuthUri(uriString).getOrNull()?.let { config ->
+            Pair(config.secret, config.issuer.ifBlank { config.accountName })
         }
     }
 

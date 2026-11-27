@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.security.BlackBoxSecurity
 import com.example.security.CsvImportPreview
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.security.CsvPasswordImporter
 import com.example.ui.components.CategoryIcon
 import com.example.ui.components.SecurityBadge
@@ -107,7 +108,8 @@ fun CsvImportDialog(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -524,6 +526,7 @@ fun CsvImportDialog(
                     }
                 }
             }
+        }
         }
     }
 }

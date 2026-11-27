@@ -44,6 +44,7 @@ object SnapshotManager {
                 put("encryptedPayload", record.encryptedPayload)
                 put("initializationVector", record.initializationVector)
                 put("isFavorite", record.isFavorite)
+                put("partitionId", record.partitionId)
                 put("passwordUpdatedAt", record.passwordUpdatedAt)
                 put("pwnedBreachCount", record.pwnedBreachCount)
                 put("createdAt", record.createdAt)
@@ -65,7 +66,17 @@ object SnapshotManager {
             put("records", recordsArray)
         }
 
-        file.writeText(rootJson.toString(2), Charsets.UTF_8)
+        val tempFile = File(snapshotDir, "${file.name}.tmp")
+        try {
+            tempFile.writeText(rootJson.toString(2), Charsets.UTF_8)
+            if (!tempFile.renameTo(file)) {
+                file.writeText(rootJson.toString(2), Charsets.UTF_8)
+                tempFile.delete()
+            }
+        } catch (e: Exception) {
+            tempFile.delete()
+            throw e
+        }
         return file
     }
 
@@ -96,6 +107,7 @@ object SnapshotManager {
                         encryptedPayload = obj.getString("encryptedPayload"),
                         initializationVector = obj.getString("initializationVector"),
                         isFavorite = obj.optBoolean("isFavorite", false),
+                        partitionId = obj.optInt("partitionId", 0),
                         passwordUpdatedAt = obj.optLong("passwordUpdatedAt", obj.optLong("updatedAt", System.currentTimeMillis())),
                         pwnedBreachCount = obj.optInt("pwnedBreachCount", 0),
                         createdAt = obj.optLong("createdAt", System.currentTimeMillis()),

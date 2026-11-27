@@ -9,7 +9,10 @@ import android.os.Build
 import android.os.PersistableBundle
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewModelScope
+import com.example.R
 import com.example.autofill.AutofillVaultSession
 import com.example.data.BlackBoxDatabase
 import com.example.data.VaultMetadataEntity
@@ -22,6 +25,7 @@ import com.example.model.VaultHealthReport
 import com.example.model.VaultItem
 import com.example.security.AttachmentStorageManager
 import com.example.security.BiometricAuthHelper
+import com.example.security.BiometricCipherInitResult
 import com.example.security.BlackBoxSecurity
 import com.example.security.BreachCheckResult
 import com.example.security.BreachChecker
@@ -31,6 +35,7 @@ import com.example.security.CsvImportPreview
 import com.example.security.CsvPasswordImporter
 import com.example.security.DecryptedSharedItem
 import com.example.security.EncryptedShareCapsule
+import com.example.security.ExportFileCleaner
 import com.example.security.HtmlVaultExporter
 import com.example.security.InactivityLockManager
 import com.example.security.OfflineHibpStats
@@ -41,18 +46,26 @@ import com.example.security.SecureShareManager
 import com.example.security.SecurityHealthAnalyzer
 import com.example.security.SnapshotManager
 import com.example.security.SnapshotPackage
+import com.example.security.TotpAuthenticatorService
+import com.example.security.TotpSeedValidationResult
+import com.example.security.TotpToken
+import com.example.security.TotpValidationResult
 import com.example.security.UnlockBackoffManager
 import com.example.security.VoiceprintTemplate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import javax.crypto.Cipher
 import javax.crypto.SecretKey
 
 data class PasswordGeneratorConfig(
@@ -108,6 +121,7 @@ data class VaultUiState(
     val isNetworkOnline: Boolean = true,
     val isSensitiveContentHidden: Boolean = false,
     val isAppInBackground: Boolean = false,
+    val requiresBiometricReauth: Boolean = false,
     val healthReport: VaultHealthReport = VaultHealthReport(100, 0, 0, 0, 0, 0, 0),
     val infoMessage: String? = null,
     val errorMessage: String? = null
@@ -122,6 +136,11 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private var failedVoiceAttempts: Int = 0
     private var voiceLockoutJob: kotlinx.coroutines.Job? = null
     private var passwordLockoutJob: kotlinx.coroutines.Job? = null
+    private var observedLifecycle: Lifecycle? = null
+    private var lifecycleEventObserver: LifecycleEventObserver? = null
+    private var activeBiometricManager: com.example.security.BiometricManagerWrapper? = null
+    private var pendingReauthCallback: (() -> Unit)? = null
+    private var hasTriggeredReauthForCurrentResume: Boolean = false
 
     private val inactivityLockManager = InactivityLockManager(viewModelScope) {
         lockVault()
@@ -129,6 +148,9 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(VaultUiState())
     val uiState: StateFlow<VaultUiState> = _uiState.asStateFlow()
+
+    private val _biometricReauthRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val biometricReauthRequests: SharedFlow<Unit> = _biometricReauthRequests.asSharedFlow()
 
     init {
         val database = BlackBoxDatabase.getDatabase(application)
@@ -146,20 +168,48 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private fun startTotpTicker() {
         viewModelScope.launch {
             while (true) {
-                val remaining = BlackBoxSecurity.getTotpRemainingSeconds()
+                val remaining = TotpAuthenticatorService.getRemainingSeconds()
                 _uiState.update { it.copy(totpSecondsRemaining = remaining) }
                 delay(1000)
             }
         }
     }
 
+    fun validateTotpInput(input: String): TotpSeedValidationResult {
+        return TotpAuthenticatorService.validateSeedInput(input)
+    }
+
+    fun generateTotpToken(storedSeedOrUri: String, timeMillis: Long = System.currentTimeMillis()): TotpToken? {
+        return TotpAuthenticatorService.generateToken(storedSeedOrUri, timeMillis)
+    }
+
+    fun verifyTotpCode(
+        storedSeedOrUri: String,
+        candidateCode: String,
+        allowedDriftSteps: Int = 1
+    ): TotpValidationResult {
+        return TotpAuthenticatorService.verifyCode(
+            storedSeedOrUri = storedSeedOrUri,
+            candidateCode = candidateCode,
+            allowedDriftSteps = allowedDriftSteps
+        )
+    }
+
+    fun generateRandomTotpSecret(): String {
+        return TotpAuthenticatorService.generateRandomSecret()
+    }
+
     private fun checkInitialization() {
         viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                ExportFileCleaner.cleanupIdleExports(getApplication())
+            }
             val metadata = repository.getMetadata()
             val initialized = metadata != null && metadata.isVaultInitialized
             val timeout = metadata?.autoLockMinutes ?: 5
             val backoffState = unlockBackoffManager.getState()
             inactivityLockManager.setTimeoutMinutes(timeout)
+            AutofillVaultSession.updateMaxIdleMinutes(timeout)
             _uiState.update {
                 it.copy(
                     isInitialized = initialized,
@@ -175,6 +225,12 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             if (backoffState.isLockedOut) {
                 startPasswordLockoutTicker(backoffState.lockoutRemainingSeconds)
             }
+            if (observedLifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true) {
+                triggerBiometricReauthIfRequired(
+                    biometricManager = activeBiometricManager,
+                    onRequireBiometricReauth = pendingReauthCallback ?: {}
+                )
+            }
         }
     }
 
@@ -183,6 +239,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             try {
                 val key = repository.initializeVault(masterPassword, enableBiometrics)
+                val persistedBioEnabled = repository.getMetadata()?.isBiometricEnabled == true
                 unlockBackoffManager.reset()
                 passwordLockoutJob?.cancel()
                 sessionSecretKey = key
@@ -197,9 +254,10 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                         isUnlocked = true,
                         isSensitiveContentHidden = false,
                         isAppInBackground = false,
+                        requiresBiometricReauth = false,
                         activePartitionId = 0,
                         isDuressMode = false,
-                        isBiometricEnabled = enableBiometrics,
+                        isBiometricEnabled = persistedBioEnabled,
                         failedPasswordAttempts = 0,
                         passwordLockoutRemainingSeconds = 0,
                         decryptedItems = items,
@@ -251,6 +309,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                         isUnlocked = true,
                         isSensitiveContentHidden = false,
                         isAppInBackground = false,
+                        requiresBiometricReauth = false,
                         activePartitionId = result.partitionId,
                         isDuressMode = result.isDuress,
                         failedPasswordAttempts = 0,
@@ -302,10 +361,24 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun unlockWithBiometrics() {
+    suspend fun prepareBiometricUnlockCipher(): BiometricCipherInitResult {
+        val result = repository.prepareBiometricUnlockCipher()
+        if (result is BiometricCipherInitResult.Invalidated) {
+            _uiState.update {
+                it.copy(
+                    isBiometricEnabled = false,
+                    requiresBiometricReauth = false,
+                    errorMessage = getApplication<Application>().getString(R.string.biometric_invalidated_error)
+                )
+            }
+        }
+        return result
+    }
+
+    fun unlockWithBiometrics(authenticatedCipher: Cipher? = null) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
-            val result = repository.unlockWithBiometrics()
+            val result = repository.unlockWithBiometrics(authenticatedCipher)
             if (result != null) {
                 val (key, masterPassword) = result
                 unlockBackoffManager.reset()
@@ -321,6 +394,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                         isUnlocked = true,
                         isSensitiveContentHidden = false,
                         isAppInBackground = false,
+                        requiresBiometricReauth = false,
                         activePartitionId = 0,
                         isDuressMode = false,
                         failedPasswordAttempts = 0,
@@ -333,10 +407,18 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 applyFilter()
             } else {
+                val persistedBioEnabled = repository.getMetadata()?.isBiometricEnabled == true
+                val message = if (!persistedBioEnabled) {
+                    getApplication<Application>().getString(R.string.biometric_invalidated_error)
+                } else {
+                    "Biometric credentials unverified. Use Master Password."
+                }
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        errorMessage = "Biometric credentials unverified. Use Master Password."
+                        isBiometricEnabled = persistedBioEnabled,
+                        requiresBiometricReauth = false,
+                        errorMessage = message
                     )
                 }
             }
@@ -348,6 +430,9 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         sessionSecretKey = null
         cachedMasterPassword = ""
         AutofillVaultSession.clear()
+        viewModelScope.launch(Dispatchers.IO) {
+            ExportFileCleaner.cleanupIdleExports(getApplication())
+        }
         _uiState.update {
             it.copy(
                 isUnlocked = false,
@@ -400,26 +485,153 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Invoked when the application transitions to the background (e.g. onStop).
-     * Purges session secrets and locks the vault.
+     * Invoked when the application transitions to the background (e.g. ON_STOP).
+     * Purges session secrets, locks the vault, and marks biometric re-authentication
+     * as required when biometrics are enabled.
      */
     fun onAppBackgrounded() {
+        val current = _uiState.value
+        val shouldRequireBioReauth = current.isInitialized && !current.isDuressMode && current.isBiometricEnabled
+        hasTriggeredReauthForCurrentResume = false
+        lockVault()
         _uiState.update {
             it.copy(
                 isAppInBackground = true,
-                isSensitiveContentHidden = true
+                isSensitiveContentHidden = true,
+                requiresBiometricReauth = shouldRequireBioReauth,
+                infoMessage = if (shouldRequireBioReauth) {
+                    "Vault locked in background. Biometric re-authentication required."
+                } else {
+                    it.infoMessage
+                }
             )
         }
-        lockVault()
     }
 
     /**
-     * Invoked when the application returns to foreground (e.g. onStart / onResume).
+     * Invoked when the application returns to foreground (e.g. ON_START / ON_RESUME).
      */
     fun onAppForegrounded() {
         _uiState.update {
             it.copy(isAppInBackground = false)
         }
+    }
+
+    /**
+     * Monitors Android [Lifecycle] events directly from the ViewModel.
+     *
+     * - On `ON_PAUSE`: conceals sensitive vault UI and cancels any active biometric prompt.
+     * - On `ON_STOP`: triggers a full vault lock state in the background and flags biometric
+     *   re-authentication as required upon returning to the foreground.
+     * - On `ON_START` / `ON_RESUME`: restores foreground state and triggers biometric
+     *   re-authentication when required.
+     * - On `ON_DESTROY`: detaches the lifecycle observer cleanly.
+     */
+    fun monitorAppLifecycle(
+        lifecycle: Lifecycle,
+        biometricManager: com.example.security.BiometricManagerWrapper? = null,
+        onRequireBiometricReauth: () -> Unit = {},
+        onCancelBiometricPrompt: () -> Unit = {}
+    ): LifecycleEventObserver {
+        detachLifecycleMonitor()
+        activeBiometricManager = biometricManager
+        pendingReauthCallback = onRequireBiometricReauth
+
+        val observer = LifecycleEventObserver { _, event ->
+            handleAppLifecycleEvent(
+                event = event,
+                biometricManager = biometricManager,
+                onRequireBiometricReauth = onRequireBiometricReauth,
+                onCancelBiometricPrompt = onCancelBiometricPrompt
+            )
+        }
+        observedLifecycle = lifecycle
+        lifecycleEventObserver = observer
+        lifecycle.addObserver(observer)
+        return observer
+    }
+
+    fun handleAppLifecycleEvent(
+        event: Lifecycle.Event,
+        biometricManager: com.example.security.BiometricManagerWrapper? = activeBiometricManager,
+        onRequireBiometricReauth: () -> Unit = pendingReauthCallback ?: {},
+        onCancelBiometricPrompt: () -> Unit = {}
+    ) {
+        when (event) {
+            Lifecycle.Event.ON_PAUSE -> {
+                onCancelBiometricPrompt()
+                biometricManager?.cancelAuthentication()
+                if (_uiState.value.isUnlocked) {
+                    hideSensitiveContent()
+                }
+            }
+            Lifecycle.Event.ON_STOP -> {
+                onCancelBiometricPrompt()
+                biometricManager?.cancelAuthentication()
+                onAppBackgrounded()
+            }
+            Lifecycle.Event.ON_START -> {
+                onAppForegrounded()
+            }
+            Lifecycle.Event.ON_RESUME -> {
+                onAppForegrounded()
+                triggerBiometricReauthIfRequired(
+                    biometricManager = biometricManager,
+                    onRequireBiometricReauth = onRequireBiometricReauth
+                )
+            }
+            Lifecycle.Event.ON_DESTROY -> {
+                onCancelBiometricPrompt()
+                biometricManager?.cancelAuthentication()
+                detachLifecycleMonitor()
+            }
+            else -> Unit
+        }
+    }
+
+    fun resetBiometricReauthGuard() {
+        hasTriggeredReauthForCurrentResume = false
+    }
+
+    fun triggerBiometricReauthIfRequired(
+        biometricManager: com.example.security.BiometricManagerWrapper? = activeBiometricManager,
+        onRequireBiometricReauth: () -> Unit = pendingReauthCallback ?: {}
+    ): Boolean {
+        val state = _uiState.value
+        val needsUnlockOrReauth = !state.isUnlocked || state.isSensitiveContentHidden || state.requiresBiometricReauth
+        if (!state.isInitialized || state.isDuressMode || !state.isBiometricEnabled || !needsUnlockOrReauth) {
+            return false
+        }
+        val sensorReady = biometricManager?.isStrongBiometricReady() ?: true
+        val promptActive = biometricManager?.isPromptActive() ?: false
+        if (!sensorReady || promptActive || hasTriggeredReauthForCurrentResume) {
+            return false
+        }
+        hasTriggeredReauthForCurrentResume = true
+        _biometricReauthRequests.tryEmit(Unit)
+        onRequireBiometricReauth()
+        return true
+    }
+
+    private fun detachLifecycleMonitor() {
+        val observer = lifecycleEventObserver
+        val lifecycle = observedLifecycle
+        if (observer != null && lifecycle != null) {
+            lifecycle.removeObserver(observer)
+        }
+        lifecycleEventObserver = null
+        observedLifecycle = null
+    }
+
+    override fun onCleared() {
+        detachLifecycleMonitor()
+        inactivityLockManager.stopMonitoring()
+        voiceLockoutJob?.cancel()
+        passwordLockoutJob?.cancel()
+        sessionSecretKey = null
+        cachedMasterPassword = ""
+        AutofillVaultSession.clear()
+        super.onCleared()
     }
 
     /**
@@ -441,12 +653,14 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun recordUserInteraction() {
         inactivityLockManager.recordUserInteraction()
+        AutofillVaultSession.touchSession()
     }
 
     fun setAutoLockTimeout(minutes: Int) {
         viewModelScope.launch {
             repository.updateAutoLockMinutes(minutes)
             inactivityLockManager.setTimeoutMinutes(minutes)
+            AutofillVaultSession.updateMaxIdleMinutes(minutes)
             _uiState.update {
                 it.copy(
                     autoLockMinutes = minutes,
@@ -1120,6 +1334,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun exportHtmlVault(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
+            ExportFileCleaner.cleanupIdleExports(context)
             val state = _uiState.value
             val metadata = repository.getMetadata() ?: return@launch
             val partitionId = state.activePartitionId
@@ -1142,6 +1357,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun exportCustomHtmlVault(context: Context, selectedItemIds: Set<String>, exportPassphrase: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            ExportFileCleaner.cleanupIdleExports(context)
             val allItems = _uiState.value.decryptedItems
             val itemsToExport = if (selectedItemIds.isEmpty()) {
                 allItems
@@ -1169,6 +1385,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun exportSnapshot(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
+            ExportFileCleaner.cleanupIdleExports(context)
             val state = _uiState.value
             val metadata = repository.getMetadata() ?: return@launch
             val partitionId = state.activePartitionId
@@ -1233,7 +1450,18 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             if (preview.records.isNotEmpty()) {
                 val decryptableCount = preview.records.count { entity ->
                     try {
-                        BlackBoxSecurity.decrypt(entity.encryptedPayload, entity.initializationVector, key)
+                        BlackBoxSecurity.decryptRecordPayload(
+                            id = entity.id,
+                            title = entity.title,
+                            category = VaultCategory.fromString(entity.category),
+                            partitionId = entity.partitionId,
+                            encryptedPayload = entity.encryptedPayload,
+                            initializationVector = entity.initializationVector,
+                            isFavorite = entity.isFavorite,
+                            createdAt = entity.createdAt,
+                            updatedAt = entity.updatedAt,
+                            secretKey = key
+                        )
                         true
                     } catch (e: Exception) {
                         false
@@ -1465,6 +1693,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                             isUnlocked = true,
                             isSensitiveContentHidden = false,
                             isAppInBackground = false,
+                            requiresBiometricReauth = false,
                             activePartitionId = 0,
                             isDuressMode = false,
                             failedPasswordAttempts = 0,
@@ -1577,6 +1806,9 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun wipeEntireVault() {
         viewModelScope.launch {
             repository.wipeVault()
+            withContext(Dispatchers.IO) {
+                ExportFileCleaner.cleanupAllExportsUnconditionally(getApplication())
+            }
             unlockBackoffManager.reset()
             passwordLockoutJob?.cancel()
             AutofillVaultSession.clear()

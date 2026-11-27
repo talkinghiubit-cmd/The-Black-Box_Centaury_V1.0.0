@@ -78,8 +78,10 @@ import com.example.data.BlackBoxDatabase
 import com.example.data.VaultRepository
 import com.example.model.VaultItem
 import com.example.security.BiometricAccessResult
+import com.example.security.BiometricCipherInitResult
 import com.example.security.BiometricVaultAuthService
 import com.example.security.UnlockBackoffManager
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.SecurityBadge
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
@@ -146,57 +148,71 @@ class AutofillAuthActivity : FragmentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = BlackBoxPitch
                 ) {
-                    AutofillAuthScreen(
-                        repository = repository,
-                        backoffManager = backoffManager,
-                        biometricAvailable = biometricAuthService.isBiometricAvailable(),
-                        modalityLabel = biometricAuthService.getModalityLabel(),
-                        webDomain = webDomain,
-                        targetPackage = targetPackage,
-                        onLaunchBiometrics = { onSuccess ->
-                            biometricAuthService.authenticateToAccessVault(
-                                activity = this,
-                                title = "Autofill Authentication",
-                                subtitle = biometricAuthService.getModalityLabel(),
-                                description = "Verify identity to unlock credentials for ${webDomain ?: targetPackage ?: "this app"}",
-                                negativeButtonText = "Use Master Password",
-                                onResult = { result ->
-                                    if (result is BiometricAccessResult.Granted) {
-                                        lifecycleScope.launch {
-                                            val unlocked = repository.unlockWithBiometrics()
-                                            if (unlocked != null) {
-                                                backoffManager.reset()
-                                                val items = repository.getAllDecryptedItems(unlocked.first, partitionId = 0)
-                                                AutofillVaultSession.updateUnlockedItems(items, isDuress = false)
-                                                onSuccess(AutofillVaultSession.getUnlockedLogins())
-                                            }
+                    IncognitoKeyboardArea {
+                        AutofillAuthScreen(
+                            repository = repository,
+                            backoffManager = backoffManager,
+                            biometricAvailable = biometricAuthService.isStrongBiometricAvailable(),
+                            modalityLabel = biometricAuthService.getModalityLabel(),
+                            webDomain = webDomain,
+                            targetPackage = targetPackage,
+                            onLaunchBiometrics = { onSuccess, onInvalidated ->
+                                lifecycleScope.launch {
+                                    when (val cipherResult = repository.prepareBiometricUnlockCipher()) {
+                                        is BiometricCipherInitResult.Ready -> {
+                                            biometricAuthService.authenticateWithCryptoObject(
+                                                activity = this@AutofillAuthActivity,
+                                                cipher = cipherResult.cipher,
+                                                title = "Autofill Authentication",
+                                                subtitle = biometricAuthService.getModalityLabel(),
+                                                description = "Verify identity to unlock credentials for ${webDomain ?: targetPackage ?: "this app"}",
+                                                onResult = { result ->
+                                                    if (result is BiometricAccessResult.Granted) {
+                                                        lifecycleScope.launch {
+                                                            val unlocked = repository.unlockWithBiometrics(result.cryptoObject?.cipher)
+                                                            if (unlocked != null) {
+                                                                backoffManager.reset()
+                                                                val items = repository.getAllDecryptedItems(unlocked.first, partitionId = 0)
+                                                                AutofillVaultSession.updateUnlockedItems(items, isDuress = false)
+                                                                onSuccess(AutofillVaultSession.getUnlockedLogins())
+                                                            } else if (repository.getMetadata()?.isBiometricEnabled != true) {
+                                                                onInvalidated("New biometric enrollment detected. Unlock with Master Password and re-enable biometrics.")
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            )
                                         }
+                                        is BiometricCipherInitResult.Invalidated -> {
+                                            onInvalidated(cipherResult.reason)
+                                        }
+                                        is BiometricCipherInitResult.Unavailable -> Unit
                                     }
                                 }
-                            )
-                        },
-                        onSelectItem = { selectedItem ->
-                            val dataset = AutofillDatasetBuilder.buildDataset(
-                                packageName = packageName,
-                                item = selectedItem,
-                                usernameId = usernameId,
-                                passwordId = passwordId
-                            )
-                            if (dataset != null) {
-                                val replyIntent = Intent().apply {
-                                    putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, dataset)
+                            },
+                            onSelectItem = { selectedItem ->
+                                val dataset = AutofillDatasetBuilder.buildDataset(
+                                    packageName = packageName,
+                                    item = selectedItem,
+                                    usernameId = usernameId,
+                                    passwordId = passwordId
+                                )
+                                if (dataset != null) {
+                                    val replyIntent = Intent().apply {
+                                        putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, dataset)
+                                    }
+                                    setResult(Activity.RESULT_OK, replyIntent)
+                                } else {
+                                    setResult(Activity.RESULT_CANCELED)
                                 }
-                                setResult(Activity.RESULT_OK, replyIntent)
-                            } else {
+                                finish()
+                            },
+                            onCancel = {
                                 setResult(Activity.RESULT_CANCELED)
+                                finish()
                             }
-                            finish()
-                        },
-                        onCancel = {
-                            setResult(Activity.RESULT_CANCELED)
-                            finish()
-                        }
-                    )
+                        )
+                    }
                 }
             }
         }
@@ -218,7 +234,7 @@ private fun AutofillAuthScreen(
     modalityLabel: String,
     webDomain: String?,
     targetPackage: String?,
-    onLaunchBiometrics: (onUnlocked: (List<VaultItem>) -> Unit) -> Unit,
+    onLaunchBiometrics: (onUnlocked: (List<VaultItem>) -> Unit, onInvalidated: (String) -> Unit) -> Unit,
     onSelectItem: (VaultItem) -> Unit,
     onCancel: () -> Unit
 ) {
@@ -243,10 +259,16 @@ private fun AutofillAuthScreen(
         isInitialized = meta != null && meta.isVaultInitialized
         isBiometricEnabled = meta?.isBiometricEnabled == true && biometricAvailable
         if (!isUnlocked && isInitialized && isBiometricEnabled) {
-            onLaunchBiometrics { logins ->
-                unlockedLogins = logins
-                isUnlocked = true
-            }
+            onLaunchBiometrics(
+                { logins ->
+                    unlockedLogins = logins
+                    isUnlocked = true
+                },
+                { reason ->
+                    isBiometricEnabled = false
+                    errorMsg = reason
+                }
+            )
         }
     }
 
@@ -434,10 +456,16 @@ private fun AutofillAuthScreen(
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedButton(
                     onClick = {
-                        onLaunchBiometrics { logins ->
-                            unlockedLogins = logins
-                            isUnlocked = true
-                        }
+                        onLaunchBiometrics(
+                            { logins ->
+                                unlockedLogins = logins
+                                isUnlocked = true
+                            },
+                            { reason ->
+                                isBiometricEnabled = false
+                                errorMsg = reason
+                            }
+                        )
                     },
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier

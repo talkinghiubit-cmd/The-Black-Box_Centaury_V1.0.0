@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import com.example.security.BlackBoxSecurity
 import com.example.security.SnapshotPackage
 import com.example.ui.VaultUiState
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.CategoryIcon
 import com.example.ui.components.PasswordStrengthBar
 import com.example.ui.components.SecurityBadge
@@ -113,7 +114,8 @@ fun BackupExportDialog(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -475,6 +477,7 @@ fun BackupExportDialog(
                 lineHeight = 14.sp
             )
         }
+        }
     }
 
     // Modal to pick a .blackbox file or paste snapshot JSON
@@ -500,52 +503,54 @@ fun BackupExportDialog(
                 )
             },
             text = {
-                Column {
-                    Button(
-                        onClick = { snapshotFilePicker.launch(arrayOf("*/*")) },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = CyanIce,
-                            contentColor = Color(0xFF00283A)
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("pick_snapshot_file_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FileUpload,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                IncognitoKeyboardArea {
+                    Column {
+                        Button(
+                            onClick = { snapshotFilePicker.launch(arrayOf("*/*")) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = CyanIce,
+                                contentColor = Color(0xFF00283A)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("pick_snapshot_file_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FileUpload,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("SELECT .BLACKBOX FILE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Or paste your .blackbox snapshot JSON content below to verify checksum and import records:",
+                            fontSize = 12.sp,
+                            color = TextSecondary
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("SELECT .BLACKBOX FILE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = importJsonText,
+                            onValueChange = { importJsonText = it },
+                            placeholder = { Text("{\"format\":\"BLACKBOX_ENCRYPTED_SNAPSHOT_V1\"...}") },
+                            minLines = 5,
+                            maxLines = 9,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedContainerColor = BlackBoxSurface,
+                                unfocusedContainerColor = BlackBoxSurface,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("snapshot_json_input")
+                        )
                     }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Or paste your .blackbox snapshot JSON content below to verify checksum and import records:",
-                        fontSize = 12.sp,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = importJsonText,
-                        onValueChange = { importJsonText = it },
-                        placeholder = { Text("{\"format\":\"BLACKBOX_ENCRYPTED_SNAPSHOT_V1\"...}") },
-                        minLines = 5,
-                        maxLines = 9,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedContainerColor = BlackBoxSurface,
-                            unfocusedContainerColor = BlackBoxSurface,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("snapshot_json_input")
-                    )
                 }
             },
             confirmButton = {
@@ -661,43 +666,44 @@ fun BackupExportDialog(
                 }
             },
             text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "Set a standalone passphrase to encrypt this exported HTML file. You will use this passphrase to decrypt it in the browser.",
-                        fontSize = 12.sp,
-                        color = TextSecondary,
-                        lineHeight = 16.sp
-                    )
+                IncognitoKeyboardArea {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "Set a standalone passphrase to encrypt this exported HTML file. You will use this passphrase to decrypt it in the browser.",
+                            fontSize = 12.sp,
+                            color = TextSecondary,
+                            lineHeight = 16.sp
+                        )
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                    OutlinedTextField(
-                        value = customExportPassphrase,
-                        onValueChange = { customExportPassphrase = it },
-                        label = { Text("Export Decryption Passphrase") },
-                        placeholder = { Text("Enter a secure passphrase") },
-                        singleLine = true,
-                        visualTransformation = if (customPassphraseVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { customPassphraseVisible = !customPassphraseVisible }) {
-                                Icon(
-                                    imageVector = if (customPassphraseVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = null,
-                                    tint = TextSecondary
-                                )
-                            }
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedContainerColor = BlackBoxSurface,
-                            unfocusedContainerColor = BlackBoxSurface,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                        OutlinedTextField(
+                            value = customExportPassphrase,
+                            onValueChange = { customExportPassphrase = it },
+                            label = { Text("Export Decryption Passphrase") },
+                            placeholder = { Text("Enter a secure passphrase") },
+                            singleLine = true,
+                            visualTransformation = if (customPassphraseVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { customPassphraseVisible = !customPassphraseVisible }) {
+                                    Icon(
+                                        imageVector = if (customPassphraseVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = null,
+                                        tint = TextSecondary
+                                    )
+                                }
+                            },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedContainerColor = BlackBoxSurface,
+                                unfocusedContainerColor = BlackBoxSurface,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
 
                     if (customExportPassphrase.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(6.dp))
@@ -787,6 +793,7 @@ fun BackupExportDialog(
                             }
                         }
                     }
+                }
                 }
             },
             confirmButton = {

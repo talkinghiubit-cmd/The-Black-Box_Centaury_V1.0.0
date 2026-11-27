@@ -5,8 +5,8 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -18,17 +18,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.FileProvider
 import androidx.fragment.app.FragmentActivity
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
 import com.example.security.BiometricAccessResult
-import com.example.security.BiometricAuthCallback
+import com.example.security.BiometricCipherInitResult
 import com.example.security.BiometricManagerWrapper
-import com.example.security.BiometricPromptOptions
 import com.example.security.BiometricVaultAuthService
+import com.example.security.ExportFileCleaner
 import com.example.ui.VaultViewModel
-import com.example.ui.VaultViewModelLifecycleObserver
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.PrivacyShieldOverlay
 import com.example.ui.dialogs.BackupExportDialog
 import com.example.ui.dialogs.CsvImportDialog
@@ -45,6 +43,8 @@ import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.LockScreen
 import com.example.ui.theme.BlackBoxPitch
 import com.example.ui.theme.BlackBoxTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -55,14 +55,24 @@ class MainActivity : FragmentActivity() {
     private val biometricAuthService by lazy { BiometricVaultAuthService.getInstance(applicationContext) }
     private val biometricManager by lazy { BiometricManagerWrapper.getInstance(applicationContext) }
 
-    private val vaultLifecycleObserver by lazy {
-        VaultViewModelLifecycleObserver(
-            viewModel = viewModel,
-            biometricManager = biometricManager,
-            onTriggerBiometric = { promptBiometrics(isManualTrigger = false) },
-            onCancelBiometric = { biometricAuthService.cancelAuthentication() },
-            autoPromptDelayMs = 250L
-        )
+    private var pendingSharedFile: File? = null
+    private var pendingShareCleanupJob: Job? = null
+
+    private val shareSheetLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val fileToPurge = pendingSharedFile
+        pendingSharedFile = null
+        ExportFileCleaner.markShareFinished()
+        if (fileToPurge != null) {
+            pendingShareCleanupJob?.cancel()
+            pendingShareCleanupJob = lifecycleScope.launch(Dispatchers.IO) {
+                // Allow receiving app (Drive, Gmail, Files) a brief grace window to stream the FileProvider FD
+                delay(15_000L)
+                ExportFileCleaner.secureDeleteFile(fileToPurge)
+                ExportFileCleaner.clearActiveShare(fileToPurge)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,8 +86,13 @@ class MainActivity : FragmentActivity() {
 
         enableEdgeToEdge()
 
-        // Register ViewModel lifecycle observer to manage background privacy concealment and foreground biometric unlock
-        lifecycle.addObserver(vaultLifecycleObserver)
+        // Monitor Activity lifecycle directly from VaultViewModel to lock on background and enforce biometric re-auth
+        viewModel.monitorAppLifecycle(
+            lifecycle = lifecycle,
+            biometricManager = biometricManager,
+            onRequireBiometricReauth = { promptBiometrics(isManualTrigger = false) },
+            onCancelBiometricPrompt = { biometricAuthService.cancelAuthentication() }
+        )
 
         setContent {
             BlackBoxTheme {
@@ -85,17 +100,17 @@ class MainActivity : FragmentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = BlackBoxPitch
                 ) {
-                    BlackBoxAppContent(
-                        viewModel = viewModel,
-                        biometricManager = biometricManager,
-                        onTriggerBiometric = { promptBiometrics(isManualTrigger = true) },
-                        onShareFile = { file -> shareExportedFile(file) }
-                    )
+                    IncognitoKeyboardArea {
+                        BlackBoxAppContent(
+                            viewModel = viewModel,
+                            biometricManager = biometricManager,
+                            onTriggerBiometric = { promptBiometrics(isManualTrigger = true) },
+                            onShareFile = { file -> shareExportedFile(file) }
+                        )
+                    }
                 }
             }
         }
-
-        observeVaultUnlockState()
     }
 
     override fun onUserInteraction() {
@@ -103,56 +118,68 @@ class MainActivity : FragmentActivity() {
         viewModel.recordUserInteraction()
     }
 
-    private fun observeVaultUnlockState() {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                viewModel.uiState.collect { state ->
-                    if (state.isUnlocked && !state.isSensitiveContentHidden) {
-                        vaultLifecycleObserver.resetSessionPromptGuard()
-                    } else if (state.isInitialized && !state.isDuressMode && state.isBiometricEnabled) {
-                        vaultLifecycleObserver.checkAndTriggerBiometrics()
-                    }
-                }
-            }
+    override fun onDestroy() {
+        if (isFinishing && !isChangingConfigurations) {
+            pendingShareCleanupJob?.cancel()
+            ExportFileCleaner.cleanupAllExportsUnconditionally(applicationContext)
         }
+        super.onDestroy()
     }
 
     private fun promptBiometrics(isManualTrigger: Boolean = false) {
-        if (!biometricAuthService.isBiometricAvailable()) {
+        if (!biometricAuthService.isStrongBiometricAvailable()) {
             if (isManualTrigger) {
-                viewModel.setErrorMessage("Biometric sensor is not available or no credentials enrolled.")
+                viewModel.setErrorMessage(getString(R.string.biometric_strong_required_error))
             }
             return
         }
 
-        biometricAuthService.authenticateToAccessVault(
-            activity = this,
-            title = getString(R.string.biometric_prompt_title),
-            subtitle = biometricAuthService.getModalityLabel(),
-            description = biometricAuthService.getSensorActionHint(),
-            negativeButtonText = getString(R.string.biometric_prompt_negative),
-            onResult = { result ->
-                when (result) {
-                    is BiometricAccessResult.Granted -> {
-                        vaultLifecycleObserver.resetSessionPromptGuard()
-                        viewModel.unlockWithBiometrics()
-                    }
-                    is BiometricAccessResult.Denied -> {
-                        viewModel.setErrorMessage(result.message)
-                    }
-                    is BiometricAccessResult.Cancelled -> {
-                        // User chose Master Password or dismissed prompt
-                    }
-                    is BiometricAccessResult.Error -> {
-                        viewModel.setErrorMessage(result.message)
+        lifecycleScope.launch {
+            when (val cipherResult = viewModel.prepareBiometricUnlockCipher()) {
+                is BiometricCipherInitResult.Ready -> {
+                    biometricAuthService.authenticateWithCryptoObject(
+                        activity = this@MainActivity,
+                        cipher = cipherResult.cipher,
+                        title = getString(R.string.biometric_prompt_title),
+                        subtitle = biometricAuthService.getModalityLabel(),
+                        description = biometricAuthService.getSensorActionHint(),
+                        onResult = { result ->
+                            when (result) {
+                                is BiometricAccessResult.Granted -> {
+                                    viewModel.resetBiometricReauthGuard()
+                                    viewModel.unlockWithBiometrics(result.cryptoObject?.cipher)
+                                }
+                                is BiometricAccessResult.Denied -> {
+                                    viewModel.setErrorMessage(result.message)
+                                }
+                                is BiometricAccessResult.Cancelled -> {
+                                    // User chose Master Password or dismissed prompt
+                                }
+                                is BiometricAccessResult.Error -> {
+                                    viewModel.setErrorMessage(result.message)
+                                }
+                            }
+                        }
+                    )
+                }
+                is BiometricCipherInitResult.Invalidated -> {
+                    // ViewModel already disabled stale biometric enrollment and displayed guidance
+                }
+                is BiometricCipherInitResult.Unavailable -> {
+                    if (isManualTrigger) {
+                        viewModel.setErrorMessage(cipherResult.reason)
                     }
                 }
             }
-        )
+        }
     }
 
     private fun shareExportedFile(file: File) {
         try {
+            pendingShareCleanupJob?.cancel()
+            pendingSharedFile = file
+            ExportFileCleaner.markShareStarted(file)
+
             val authority = "${applicationContext.packageName}.fileprovider"
             val uri = FileProvider.getUriForFile(applicationContext, authority, file)
             val mimeType = if (file.name.endsWith(".html")) "text/html" else "application/octet-stream"
@@ -163,8 +190,11 @@ class MainActivity : FragmentActivity() {
                 putExtra(Intent.EXTRA_SUBJECT, "The Black-Box Export — ${file.name}")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(Intent.createChooser(shareIntent, "Save or Export File"))
+            shareSheetLauncher.launch(Intent.createChooser(shareIntent, "Save or Export File"))
         } catch (e: Exception) {
+            pendingSharedFile = null
+            ExportFileCleaner.clearActiveShare(file)
+            ExportFileCleaner.secureDeleteFile(file)
             viewModel.setErrorMessage("Export failed: ${e.message ?: "Unable to share file"}")
         } finally {
             viewModel.clearShareIntent()
@@ -202,7 +232,7 @@ fun BlackBoxAppContent(
             uiState = uiState,
             biometricManager = biometricManager,
             onUnlockPassword = { viewModel.unlockWithPassword(it) },
-            onUnlockBiometrics = { viewModel.unlockWithBiometrics() },
+            onUnlockBiometrics = onTriggerBiometric,
             onInitializeVault = { pw, bio -> viewModel.initializeVault(pw, bio) },
             onTriggerBiometricPrompt = onTriggerBiometric,
             onTriggerVoiceUnlock = { showVoiceUnlockDialog = true },

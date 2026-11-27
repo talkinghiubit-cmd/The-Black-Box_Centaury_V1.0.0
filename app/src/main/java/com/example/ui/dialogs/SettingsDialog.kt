@@ -87,6 +87,7 @@ import com.example.security.BiometricAuthHelper
 import com.example.security.BlackBoxSecurity
 import com.example.security.VoiceprintTemplate
 import com.example.ui.VaultUiState
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.PasswordStrengthBar
 import com.example.ui.components.SecurityBadge
 import com.example.ui.theme.AmberWarning
@@ -122,7 +123,7 @@ fun SettingsDialog(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val isBiometricAvailable = remember { BiometricAuthHelper.isBiometricAvailable(context) }
+    val isBiometricAvailable = remember { BiometricAuthHelper.isStrongBiometricAvailable(context) }
     val autofillSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
 
     var isAutofillServiceActive by remember {
@@ -160,7 +161,8 @@ fun SettingsDialog(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -810,6 +812,7 @@ fun SettingsDialog(
                 )
             }
         }
+        }
     }
 
     // Duress PIN Setup Dialog
@@ -833,67 +836,69 @@ fun SettingsDialog(
                 )
             },
             text = {
-                Column {
-                    Text(
-                        text = "Set a secondary PIN that triggers the decoy vault. If forced to unlock your phone, enter this PIN to display convincing decoy accounts.",
-                        fontSize = 12.sp,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    OutlinedTextField(
-                        value = pin,
-                        onValueChange = { pin = it },
-                        label = { Text("Duress PIN / Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedTextField(
-                        value = confirmPin,
-                        onValueChange = { confirmPin = it },
-                        label = { Text("Confirm Duress PIN") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = autoGenDecoys,
-                            onCheckedChange = { autoGenDecoys = it },
-                            colors = CheckboxDefaults.colors(checkedColor = EmeraldNeon)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
+                IncognitoKeyboardArea {
+                    Column {
                         Text(
-                            text = "Populate realistic decoy accounts (Netflix, Spotify, Wi-Fi)",
+                            text = "Set a secondary PIN that triggers the decoy vault. If forced to unlock your phone, enter this PIN to display convincing decoy accounts.",
                             fontSize = 12.sp,
-                            color = TextPrimary
+                            color = TextSecondary
                         )
-                    }
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                    if (errorMsg != null) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(text = errorMsg!!, color = CrimsonAlert, fontSize = 12.sp)
+                        OutlinedTextField(
+                            value = pin,
+                            onValueChange = { pin = it },
+                            label = { Text("Duress PIN / Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = confirmPin,
+                            onValueChange = { confirmPin = it },
+                            label = { Text("Confirm Duress PIN") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = autoGenDecoys,
+                                onCheckedChange = { autoGenDecoys = it },
+                                colors = CheckboxDefaults.colors(checkedColor = EmeraldNeon)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Populate realistic decoy accounts (Netflix, Spotify, Wi-Fi)",
+                                fontSize = 12.sp,
+                                color = TextPrimary
+                            )
+                        }
+
+                        if (errorMsg != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(text = errorMsg!!, color = CrimsonAlert, fontSize = 12.sp)
+                        }
                     }
                 }
             },
@@ -962,28 +967,30 @@ fun SettingsDialog(
             onDismissRequest = { showBiometricPasswordPrompt = false },
             title = { Text("Confirm Master Password", color = TextPrimary) },
             text = {
-                Column {
-                    Text(
-                        text = "Enter your Master Password to authenticate biometric key store modification:",
-                        fontSize = 13.sp,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = pw,
-                        onValueChange = { pw = it },
-                        label = { Text("Master Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                IncognitoKeyboardArea {
+                    Column {
+                        Text(
+                            text = "Enter your Master Password to authenticate biometric key store modification:",
+                            fontSize = 13.sp,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = pw,
+                            onValueChange = { pw = it },
+                            label = { Text("Master Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -1026,40 +1033,42 @@ fun SettingsDialog(
                 )
             },
             text = {
-                Column {
-                    Text(
-                        text = if (voiceActionIsDisable) {
-                            "Enter your Master Password to purge your sealed voiceprint profile:"
-                        } else {
-                            "Enter your Master Password to seal an encrypted voiceprint in the Android Keystore:"
-                        },
-                        fontSize = 13.sp,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = pw,
-                        onValueChange = {
-                            pw = it
-                            authError = null
-                        },
-                        label = { Text("Master Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("voice_auth_master_password_input")
-                    )
-                    if (authError != null) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(text = authError!!, color = CrimsonAlert, fontSize = 12.sp)
+                IncognitoKeyboardArea {
+                    Column {
+                        Text(
+                            text = if (voiceActionIsDisable) {
+                                "Enter your Master Password to purge your sealed voiceprint profile:"
+                            } else {
+                                "Enter your Master Password to seal an encrypted voiceprint in the Android Keystore:"
+                            },
+                            fontSize = 13.sp,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = pw,
+                            onValueChange = {
+                                pw = it
+                                authError = null
+                            },
+                            label = { Text("Master Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("voice_auth_master_password_input")
+                        )
+                        if (authError != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(text = authError!!, color = CrimsonAlert, fontSize = 12.sp)
+                        }
                     }
                 }
             },
@@ -1135,74 +1144,76 @@ fun SettingsDialog(
                 )
             },
             text = {
-                Column {
-                    Text(
-                        text = "All primary records will be decrypted with your old key and re-encrypted with a freshly derived key.",
-                        fontSize = 12.sp,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
+                IncognitoKeyboardArea {
+                    Column {
+                        Text(
+                            text = "All primary records will be decrypted with your old key and re-encrypted with a freshly derived key.",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                    OutlinedTextField(
-                        value = oldPw,
-                        onValueChange = { oldPw = it },
-                        label = { Text("Current Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                        OutlinedTextField(
+                            value = oldPw,
+                            onValueChange = { oldPw = it },
+                            label = { Text("Current Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedTextField(
-                        value = newPw,
-                        onValueChange = { newPw = it },
-                        label = { Text("New Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (newPw.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        PasswordStrengthBar(strength = strength)
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedTextField(
-                        value = confirmNewPw,
-                        onValueChange = { confirmNewPw = it },
-                        label = { Text("Confirm New Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = EmeraldNeon,
-                            unfocusedBorderColor = BlackBoxBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (statusMsg != null) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(text = statusMsg!!, color = CrimsonAlert, fontSize = 12.sp)
+
+                        OutlinedTextField(
+                            value = newPw,
+                            onValueChange = { newPw = it },
+                            label = { Text("New Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        if (newPw.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            PasswordStrengthBar(strength = strength)
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = confirmNewPw,
+                            onValueChange = { confirmNewPw = it },
+                            label = { Text("Confirm New Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = BlackBoxBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        if (statusMsg != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(text = statusMsg!!, color = CrimsonAlert, fontSize = 12.sp)
+                        }
                     }
                 }
             },

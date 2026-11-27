@@ -1,9 +1,11 @@
 package com.example.data
 
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.util.Base64
 import com.example.model.VaultAttachment
 import com.example.model.VaultCategory
 import com.example.model.VaultItem
+import com.example.security.BiometricCipherInitResult
 import com.example.security.BlackBoxSecurity
 import com.example.security.VoiceBiometricEngine
 import com.example.security.VoiceVerificationResult
@@ -11,6 +13,7 @@ import com.example.security.VoiceprintTemplate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import javax.crypto.Cipher
 import javax.crypto.SecretKey
 
 data class UnlockResult(
@@ -109,12 +112,42 @@ class VaultRepository(
         null
     }
 
-    suspend fun unlockWithBiometrics(): Pair<SecretKey, String>? = withContext(Dispatchers.IO) {
+    suspend fun prepareBiometricUnlockCipher(): BiometricCipherInitResult = withContext(Dispatchers.IO) {
+        val meta = vaultDao.getMetadata()
+            ?: return@withContext BiometricCipherInitResult.Unavailable("Vault metadata unavailable.")
+        if (!meta.isBiometricEnabled || meta.biometricWrappedPassword.isNullOrBlank()) {
+            return@withContext BiometricCipherInitResult.Unavailable("Biometric unlock is not enabled.")
+        }
+        val result = BlackBoxSecurity.prepareBiometricDecryptCipher(meta.biometricWrappedPassword)
+        if (result is BiometricCipherInitResult.Invalidated) {
+            invalidateBiometricEnrollment()
+        }
+        result
+    }
+
+    suspend fun invalidateBiometricEnrollment() = withContext(Dispatchers.IO) {
+        BlackBoxSecurity.deleteBiometricKeystoreKey()
+        val meta = vaultDao.getMetadata() ?: return@withContext
+        if (meta.isBiometricEnabled || meta.biometricWrappedPassword != null) {
+            vaultDao.insertMetadata(
+                meta.copy(
+                    isBiometricEnabled = false,
+                    biometricWrappedPassword = null
+                )
+            )
+        }
+    }
+
+    suspend fun unlockWithBiometrics(authenticatedCipher: Cipher? = null): Pair<SecretKey, String>? = withContext(Dispatchers.IO) {
+        if (authenticatedCipher == null) return@withContext null
         val meta = vaultDao.getMetadata() ?: return@withContext null
         if (!meta.isBiometricEnabled || meta.biometricWrappedPassword == null) return@withContext null
 
         try {
-            val masterPassword = BlackBoxSecurity.unwrapPasswordFromBiometrics(meta.biometricWrappedPassword)
+            val masterPassword = BlackBoxSecurity.unwrapPasswordFromBiometrics(
+                wrappedBase64 = meta.biometricWrappedPassword,
+                authenticatedCipher = authenticatedCipher
+            )
             val salt = Base64.decode(meta.masterSalt, Base64.NO_WRAP)
             if (BlackBoxSecurity.verifyPassword(masterPassword.toCharArray(), salt, meta.verifierHash)) {
                 val key = BlackBoxSecurity.deriveMasterKey(masterPassword.toCharArray(), salt)
@@ -122,7 +155,10 @@ class VaultRepository(
             } else {
                 null
             }
-        } catch (e: Exception) {
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            invalidateBiometricEnrollment()
+            null
+        } catch (_: Exception) {
             null
         }
     }
@@ -171,6 +207,7 @@ class VaultRepository(
             return@withContext false
         }
         try {
+            BlackBoxSecurity.deleteBiometricKeystoreKey()
             val wrapped = if (enabled) {
                 BlackBoxSecurity.wrapPasswordForBiometrics(currentPassword)
             } else null
@@ -322,10 +359,9 @@ class VaultRepository(
             )
         )
 
-        // Re-encrypt primary records with the new key
+        // Re-encrypt primary records with the new key (v2 AAD-authenticated AES-256-GCM)
         val reencryptedEntities = allDecrypted.map { item ->
-            val payload = BlackBoxSecurity.serializeItemPayload(item)
-            val (ciphertext, iv) = BlackBoxSecurity.encrypt(payload, newKey)
+            val (ciphertext, iv) = BlackBoxSecurity.encryptRecordPayload(item, newKey, partitionId = 0)
             VaultRecordEntity(
                 id = item.id,
                 title = item.title,
@@ -396,8 +432,7 @@ class VaultRepository(
     }
 
     suspend fun saveItem(item: VaultItem, secretKey: SecretKey, partitionId: Int = 0) = withContext(Dispatchers.IO) {
-        val payload = BlackBoxSecurity.serializeItemPayload(item.copy(partitionId = partitionId))
-        val (ciphertext, iv) = BlackBoxSecurity.encrypt(payload, secretKey)
+        val (ciphertext, iv) = BlackBoxSecurity.encryptRecordPayload(item, secretKey, partitionId)
         val entity = VaultRecordEntity(
             id = item.id,
             title = item.title,
@@ -469,8 +504,7 @@ class VaultRepository(
             if (items.isEmpty()) return@withContext
             val now = System.currentTimeMillis()
             val recordEntities = items.map { item ->
-                val payload = BlackBoxSecurity.serializeItemPayload(item.copy(partitionId = partitionId))
-                val (ciphertext, iv) = BlackBoxSecurity.encrypt(payload, secretKey)
+                val (ciphertext, iv) = BlackBoxSecurity.encryptRecordPayload(item, secretKey, partitionId)
                 VaultRecordEntity(
                     id = item.id,
                     title = item.title,
@@ -566,19 +600,17 @@ class VaultRepository(
 
         entities.mapNotNull { entity ->
             try {
-                val decryptedJson = BlackBoxSecurity.decrypt(
-                    entity.encryptedPayload,
-                    entity.initializationVector,
-                    secretKey
-                )
-                val item = BlackBoxSecurity.deserializeItemPayload(
+                val item = BlackBoxSecurity.decryptRecordPayload(
                     id = entity.id,
                     title = entity.title,
                     category = VaultCategory.fromString(entity.category),
+                    partitionId = entity.partitionId,
+                    encryptedPayload = entity.encryptedPayload,
+                    initializationVector = entity.initializationVector,
                     isFavorite = entity.isFavorite,
                     createdAt = entity.createdAt,
                     updatedAt = entity.updatedAt,
-                    jsonString = decryptedJson
+                    secretKey = secretKey
                 )
                 val itemAttachments = (attachmentMap[entity.id] ?: emptyList()).map {
                     VaultAttachment(
@@ -617,19 +649,17 @@ class VaultRepository(
 
         entities.mapNotNull { entity ->
             try {
-                val decryptedJson = BlackBoxSecurity.decrypt(
-                    entity.encryptedPayload,
-                    entity.initializationVector,
-                    secretKey
-                )
-                val item = BlackBoxSecurity.deserializeItemPayload(
+                val item = BlackBoxSecurity.decryptRecordPayload(
                     id = entity.id,
                     title = entity.title,
                     category = VaultCategory.fromString(entity.category),
+                    partitionId = entity.partitionId,
+                    encryptedPayload = entity.encryptedPayload,
+                    initializationVector = entity.initializationVector,
                     isFavorite = entity.isFavorite,
                     createdAt = entity.createdAt,
                     updatedAt = entity.updatedAt,
-                    jsonString = decryptedJson
+                    secretKey = secretKey
                 )
                 val itemAttachments = (attachmentMap[entity.id] ?: emptyList()).map {
                     VaultAttachment(
@@ -688,6 +718,7 @@ class VaultRepository(
     }
 
     suspend fun wipeVault() = withContext(Dispatchers.IO) {
+        BlackBoxSecurity.deleteBiometricKeystoreKey()
         vaultDao.deleteAllRecords()
         vaultDao.deleteAllAttachments()
         passwordDao?.deleteAllPasswords()

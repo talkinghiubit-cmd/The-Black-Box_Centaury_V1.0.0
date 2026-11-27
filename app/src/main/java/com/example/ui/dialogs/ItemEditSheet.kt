@@ -22,7 +22,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Autorenew
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -39,7 +41,9 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -55,21 +60,29 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.model.VaultCategory
 import com.example.model.VaultItem
 import com.example.security.BlackBoxSecurity
+import com.example.security.TotpAlgorithm
+import com.example.security.TotpAuthenticatorService
+import com.example.security.TotpConfig
+import com.example.security.TotpSeedValidationResult
 import com.example.ui.components.CategoryIcon
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.PasswordStrengthBar
 import com.example.ui.theme.BlackBoxBorder
 import com.example.ui.theme.BlackBoxPitch
 import com.example.ui.theme.BlackBoxSurface
 import com.example.ui.theme.BlackBoxSurfaceVariant
+import com.example.ui.theme.CrimsonAlert
 import com.example.ui.theme.CyanIce
 import com.example.ui.theme.EmeraldContainer
 import com.example.ui.theme.EmeraldNeon
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -99,13 +112,28 @@ fun ItemEditSheet(
     var passwordVisible by remember { mutableStateOf(false) }
     val passwordStrength = remember(password) { BlackBoxSecurity.evaluatePasswordStrength(password) }
 
+    val totpValidation = remember(totpSecret) {
+        if (totpSecret.isBlank()) null else TotpAuthenticatorService.validateSeedInput(totpSecret)
+    }
+    val isTotpInvalid = category == VaultCategory.LOGIN && totpValidation is TotpSeedValidationResult.Invalid
+    var previewTickMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(totpValidation) {
+        if (totpValidation is TotpSeedValidationResult.Valid) {
+            while (true) {
+                previewTickMillis = System.currentTimeMillis()
+                delay(1000L)
+            }
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -262,22 +290,181 @@ fun ItemEditSheet(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // TOTP Authenticator Seed Input
+                    // TOTP Authenticator Seed / Google Authenticator URI Input
                     OutlinedTextField(
                         value = totpSecret,
                         onValueChange = { input ->
-                            val parsed = BlackBoxSecurity.parseTotpUri(input)
-                            totpSecret = parsed?.first ?: input.trim()
+                            totpSecret = input.trimStart()
                         },
-                        label = { Text("2FA TOTP Secret Key (Optional)") },
-                        placeholder = { Text("Base32 Key or otpauth:// URI") },
+                        label = { Text(stringResource(R.string.totp_input_label)) },
+                        placeholder = { Text(stringResource(R.string.totp_input_placeholder)) },
                         singleLine = true,
+                        isError = isTotpInvalid,
+                        trailingIcon = {
+                            IconButton(
+                                onClick = {
+                                    totpSecret = TotpAuthenticatorService.generateRandomSecret()
+                                },
+                                modifier = Modifier.testTag("generate_totp_seed_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Autorenew,
+                                    contentDescription = "Generate 2FA Secret Seed",
+                                    tint = CyanIce
+                                )
+                            }
+                        },
                         colors = defaultTextFieldColors(),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("edit_totp_secret_input")
                     )
+
+                    when (totpValidation) {
+                        is TotpSeedValidationResult.Invalid -> {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CrimsonAlert.copy(alpha = 0.12f))
+                                    .border(1.dp, CrimsonAlert.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                                    .testTag("totp_validation_error")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = "Invalid 2FA seed",
+                                    tint = CrimsonAlert,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = totpValidation.reason,
+                                    fontSize = 11.sp,
+                                    color = CrimsonAlert,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                        is TotpSeedValidationResult.Valid -> {
+                            val cfg = totpValidation.config
+                            val previewToken = remember(totpValidation, previewTickMillis) {
+                                TotpAuthenticatorService.generateToken(totpValidation.storableValue, previewTickMillis)
+                            }
+                            fun updateConfig(transform: (TotpConfig) -> TotpConfig) {
+                                val next = transform(cfg).let { updated ->
+                                    if (updated.issuer.isBlank() && title.isNotBlank() && updated.hasExtendedMetadata) {
+                                        updated.copy(issuer = title.trim(), accountName = username.trim())
+                                    } else {
+                                        updated
+                                    }
+                                }
+                                totpSecret = if (next.hasExtendedMetadata) {
+                                    TotpAuthenticatorService.buildOtpAuthUri(next)
+                                } else {
+                                    next.secret
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(BlackBoxPitch)
+                                    .border(1.dp, CyanIce.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                                    .padding(10.dp)
+                                    .testTag("totp_preview_card")
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Valid Google Authenticator seed",
+                                            tint = EmeraldNeon,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = buildString {
+                                                append("VALID • ${cfg.algorithm.displayName} • ${cfg.digits}D • ${cfg.periodSeconds}s")
+                                                if (cfg.issuer.isNotBlank()) append(" • ${cfg.issuer}")
+                                            },
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EmeraldNeon
+                                        )
+                                    }
+                                    if (previewToken != null) {
+                                        Text(
+                                            text = "${previewToken.formattedCode} (${previewToken.remainingSeconds}s)",
+                                            fontSize = 13.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            color = CyanIce
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    TotpAlgorithm.entries.forEach { algo ->
+                                        FilterChip(
+                                            selected = cfg.algorithm == algo,
+                                            onClick = { updateConfig { it.copy(algorithm = algo) } },
+                                            label = { Text(algo.uriParam, fontSize = 10.sp, fontFamily = FontFamily.Monospace) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = EmeraldContainer,
+                                                selectedLabelColor = EmeraldNeon,
+                                                containerColor = BlackBoxSurfaceVariant,
+                                                labelColor = TextMuted
+                                            )
+                                        )
+                                    }
+                                    listOf(6, 8).forEach { digitCount ->
+                                        FilterChip(
+                                            selected = cfg.digits == digitCount,
+                                            onClick = { updateConfig { it.copy(digits = digitCount) } },
+                                            label = { Text("${digitCount} digits", fontSize = 10.sp, fontFamily = FontFamily.Monospace) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = EmeraldContainer,
+                                                selectedLabelColor = EmeraldNeon,
+                                                containerColor = BlackBoxSurfaceVariant,
+                                                labelColor = TextMuted
+                                            )
+                                        )
+                                    }
+                                    listOf(30, 60).forEach { periodSec ->
+                                        FilterChip(
+                                            selected = cfg.periodSeconds == periodSec,
+                                            onClick = { updateConfig { it.copy(periodSeconds = periodSec) } },
+                                            label = { Text("${periodSec}s", fontSize = 10.sp, fontFamily = FontFamily.Monospace) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = EmeraldContainer,
+                                                selectedLabelColor = EmeraldNeon,
+                                                containerColor = BlackBoxSurfaceVariant,
+                                                labelColor = TextMuted
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        null -> Unit
+                    }
                 }
                 VaultCategory.NOTE -> {
                     OutlinedTextField(
@@ -402,6 +589,7 @@ fun ItemEditSheet(
 
             // Save Button
             Button(
+                enabled = !isTotpInvalid,
                 onClick = {
                     val finalTitle = if (title.trim().isEmpty()) {
                         when (category) {
@@ -412,6 +600,13 @@ fun ItemEditSheet(
                         }
                     } else title.trim()
 
+                    val normalizedTotp = when {
+                        category != VaultCategory.LOGIN -> totpSecret.trim()
+                        totpSecret.isBlank() -> ""
+                        totpValidation is TotpSeedValidationResult.Valid -> totpValidation.storableValue
+                        else -> totpSecret.trim()
+                    }
+
                     onSave(
                         item.copy(
                             title = finalTitle,
@@ -419,7 +614,7 @@ fun ItemEditSheet(
                             username = username,
                             password = password,
                             url = url,
-                            totpSecret = totpSecret.trim(),
+                            totpSecret = normalizedTotp,
                             notes = notes,
                             cardHolder = cardHolder,
                             cardNumber = cardNumber,
@@ -448,6 +643,7 @@ fun ItemEditSheet(
                     letterSpacing = 1.sp
                 )
             }
+        }
         }
     }
 }

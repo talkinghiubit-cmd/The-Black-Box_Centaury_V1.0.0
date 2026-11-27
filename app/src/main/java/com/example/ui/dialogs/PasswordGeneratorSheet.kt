@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import com.example.security.PasswordOptions
 import com.example.ui.PasswordGeneratorConfig
 import com.example.ui.VaultUiState
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.PasswordStrengthBar
 import com.example.ui.theme.BlackBoxBorder
 import com.example.ui.theme.BlackBoxSurface
@@ -81,7 +82,8 @@ fun PasswordGeneratorSheet(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -404,6 +406,7 @@ fun PasswordGeneratorSheet(
                     letterSpacing = 1.sp
                 )
             }
+        }
         }
     }
 }

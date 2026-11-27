@@ -98,7 +98,7 @@ fun LockScreen(
     onOpenPrivacyPolicy: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val isBiometricHardwareAvailable = remember { biometricManager.isReady() }
+    val isBiometricHardwareAvailable = remember { biometricManager.isStrongBiometricReady() }
     val modalityLabel = remember { biometricManager.getModalityDisplayName() }
     val actionHint = remember { biometricManager.getSensorActionHint() }
 
@@ -144,6 +144,7 @@ fun LockScreen(
             isLoading = uiState.isLoading,
             isBiometricEnabled = uiState.isBiometricEnabled,
             isVoiceBiometricEnabled = uiState.isVoiceBiometricEnabled,
+            requiresBiometricReauth = uiState.requiresBiometricReauth,
             passwordLockoutRemainingSeconds = uiState.passwordLockoutRemainingSeconds,
             errorMessage = uiState.errorMessage,
             modalityLabel = modalityLabel,
@@ -442,6 +443,7 @@ private fun VaultLockedView(
     isLoading: Boolean,
     isBiometricEnabled: Boolean,
     isVoiceBiometricEnabled: Boolean = false,
+    requiresBiometricReauth: Boolean = false,
     passwordLockoutRemainingSeconds: Int = 0,
     errorMessage: String?,
     modalityLabel: String = "Biometrics",
@@ -584,6 +586,27 @@ private fun VaultLockedView(
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center
             )
+        } else if (requiresBiometricReauth && isBiometricEnabled) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(CyanIce.copy(alpha = 0.12f))
+                    .border(1.dp, CyanIce.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag("biometric_reauth_banner")
+            ) {
+                Text(
+                    text = stringResource(R.string.biometric_reauth_required_banner),
+                    color = CyanIce,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(20.dp))

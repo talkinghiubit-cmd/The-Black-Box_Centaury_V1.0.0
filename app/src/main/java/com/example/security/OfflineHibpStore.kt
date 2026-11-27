@@ -97,13 +97,32 @@ object OfflineHibpStore {
         val file = prefixFile(context, prefix) ?: return
         synchronized(cacheLock) {
             try {
-                file.writeText(rangeBody, Charsets.UTF_8)
+                atomicWriteText(file, rangeBody)
                 if (enforceAutoLimit) {
                     pruneOldestIfNeeded(getCacheDir(context), MAX_AUTO_CACHED_FILES)
                 }
             } catch (_: Exception) {
                 // Best-effort cache write; never fail verification on disk cache write error
             }
+        }
+    }
+
+    private fun atomicWriteText(target: File, content: String) {
+        val parent = target.parentFile ?: return
+        if (!parent.exists()) parent.mkdirs()
+        val tempFile = File(parent, "${target.name}.tmp")
+        try {
+            tempFile.writeText(content, Charsets.UTF_8)
+            if (target.exists()) {
+                target.delete()
+            }
+            if (!tempFile.renameTo(target)) {
+                target.writeText(content, Charsets.UTF_8)
+                tempFile.delete()
+            }
+        } catch (e: Exception) {
+            tempFile.delete()
+            throw e
         }
     }
 
@@ -296,7 +315,7 @@ object OfflineHibpStore {
                     append(sfx).append(':').append(cnt).append('\n')
                 }
             }
-            file.writeText(content, Charsets.UTF_8)
+            atomicWriteText(file, content)
         }
     }
 }

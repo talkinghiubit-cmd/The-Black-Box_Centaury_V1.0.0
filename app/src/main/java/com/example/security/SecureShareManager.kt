@@ -342,6 +342,7 @@ object SecureShareManager {
         capsule: EncryptedShareCapsule,
         item: VaultItem
     ): File {
+        ExportFileCleaner.cleanupIdleExports(context)
         val shareDir = File(context.cacheDir, "shares")
         if (!shareDir.exists()) shareDir.mkdirs()
 

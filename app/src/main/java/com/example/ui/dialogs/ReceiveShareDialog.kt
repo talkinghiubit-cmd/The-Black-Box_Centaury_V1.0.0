@@ -69,6 +69,7 @@ import com.example.security.SecureShareManager
 import com.example.security.ShareDecryptionException
 import com.example.security.ShareExpiredException
 import com.example.ui.components.CategoryIcon
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
 import com.example.ui.theme.BlackBoxSurface
@@ -108,7 +109,8 @@ fun ReceiveShareDialog(
         containerColor = BlackBoxSurface,
         dragHandle = null
     ) {
-        Column(
+        IncognitoKeyboardArea {
+            Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
@@ -922,6 +924,7 @@ fun ReceiveShareDialog(
                     }
                 }
             }
+        }
         }
     }
 }

@@ -77,7 +77,7 @@ import com.example.R
 import com.example.model.VaultCategory
 import com.example.model.VaultHealthReport
 import com.example.model.VaultItem
-import com.example.security.BlackBoxSecurity
+import com.example.security.TotpAuthenticatorService
 import com.example.ui.VaultUiState
 import com.example.ui.components.CategoryIcon
 import com.example.ui.theme.AmberWarning
@@ -530,8 +530,8 @@ private fun VaultItemCard(
     onCopyTotp: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val totpCode = remember(item.totpSecret, totpSecondsRemaining) {
-        if (item.totpSecret.isNotBlank()) BlackBoxSecurity.generateTotpCode(item.totpSecret) else null
+    val totpToken = remember(item.totpSecret, totpSecondsRemaining) {
+        if (item.totpSecret.isNotBlank()) TotpAuthenticatorService.generateToken(item.totpSecret) else null
     }
     val borderColor = when {
         item.pwnedBreachCount > 0 -> CrimsonAlert.copy(alpha = 0.65f)
@@ -626,18 +626,18 @@ private fun VaultItemCard(
                 }
 
                 // Inline TOTP Code chip
-                if (totpCode != null) {
+                if (totpToken != null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
                             .background(BlackBoxSurface)
-                            .clickable { onCopyTotp(totpCode) }
+                            .clickable { onCopyTotp(totpToken.code) }
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = "2FA: $totpCode",
+                            text = "2FA: ${totpToken.formattedCode}",
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -645,7 +645,7 @@ private fun VaultItemCard(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "${totpSecondsRemaining}s",
+                            text = "${totpToken.remainingSeconds}s",
                             fontSize = 9.sp,
                             fontFamily = FontFamily.Monospace,
                             color = TextMuted
