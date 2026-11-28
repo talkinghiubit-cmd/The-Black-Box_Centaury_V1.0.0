@@ -95,4 +95,18 @@ object AttachmentStorageManager {
             // ignore
         }
     }
+
+    /**
+     * Permanently deletes all encrypted attachment blobs from internal storage.
+     */
+    suspend fun deleteAllAttachments(context: Context) = withContext(Dispatchers.IO) {
+        try {
+            val dir = File(context.filesDir, ATTACHMENT_DIR)
+            if (dir.exists()) {
+                dir.deleteRecursively()
+            }
+        } catch (_: Exception) {
+            // ignore
+        }
+    }
 }

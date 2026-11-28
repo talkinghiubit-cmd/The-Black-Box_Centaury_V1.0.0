@@ -307,6 +307,7 @@ fun BlackBoxAppContent(
             onInitializeVault = { pw, bio -> viewModel.initializeVault(pw, bio) },
             onTriggerBiometricPrompt = onTriggerBiometric,
             onTriggerVoiceUnlock = { showVoiceUnlockDialog = true },
+            onForgotPasswordWipeVault = { viewModel.wipeEntireVault() },
             onOpenPrivacyPolicy = { showPrivacyDialog = true }
         )
     } else if (uiState.isSensitiveContentHidden) {

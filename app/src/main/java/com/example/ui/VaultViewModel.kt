@@ -1999,16 +1999,28 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun wipeEntireVault() {
         viewModelScope.launch {
+            inactivityLockManager.stopMonitoring("Vault erased — inactivity monitor stopped")
+            if (breachAuditJob?.isActive == true) {
+                breachAuditJob?.cancel()
+                breachAuditJob = null
+            }
             NfcPaymentSession.disarm(
                 context = getApplication(),
                 reason = "Vault wiped — NFC contactless session disarmed"
             )
             repository.wipeVault()
             withContext(Dispatchers.IO) {
+                AttachmentStorageManager.deleteAllAttachments(getApplication())
                 ExportFileCleaner.cleanupAllExportsUnconditionally(getApplication())
+                OfflineHibpStore.clearCache(getApplication())
             }
             unlockBackoffManager.reset()
+            failedVoiceAttempts = 0
+            voiceLockoutJob?.cancel()
             passwordLockoutJob?.cancel()
+            hasTriggeredReauthForCurrentResume = false
+            pendingWidgetAction = null
+            pendingWidgetNoteId = null
             AutofillVaultSession.clear()
             ConfidentialNotesMemoryCache.clear()
             ConfidentialNotesWidgetProvider.refreshAllWidgets(getApplication())
@@ -2021,7 +2033,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     isLoading = false,
                     backgroundGuardStatus = BlackBoxBackgroundScheduler.getStatus(getApplication()),
                     nfcHardwareStatus = NfcContactlessHelper.queryHardwareStatus(getApplication()),
-                    infoMessage = "Vault wiped cleanly"
+                    infoMessage = getApplication<Application>().getString(R.string.vault_erased_info)
                 )
             }
         }

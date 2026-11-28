@@ -719,6 +719,7 @@ class VaultRepository(
 
     suspend fun wipeVault() = withContext(Dispatchers.IO) {
         BlackBoxSecurity.deleteBiometricKeystoreKey()
+        BlackBoxSecurity.deleteVoiceBiometricKeystoreKey()
         vaultDao.deleteAllRecords()
         vaultDao.deleteAllAttachments()
         passwordDao?.deleteAllPasswords()

@@ -577,6 +577,15 @@ object BlackBoxSecurity {
         return String(decrypted, Charsets.UTF_8)
     }
 
+    fun deleteVoiceBiometricKeystoreKey() {
+        runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            if (keyStore.containsAlias(KEYSTORE_ALIAS_VOICE_BIOMETRIC)) {
+                keyStore.deleteEntry(KEYSTORE_ALIAS_VOICE_BIOMETRIC)
+            }
+        }
+    }
+
     // =========================================================================
     // RFC 6238 TOTP 2FA Authenticator Engine (delegates to TotpAuthenticatorService)
     // =========================================================================

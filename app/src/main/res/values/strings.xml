@@ -68,4 +68,12 @@
     <string name="nfc_hce_aid_group_desc">Contactless payment cards — pay contactlessly via NFC HCE</string>
     <string name="privacy_nfc_title">5. NFC Contactless Payments (Pay with NFC)</string>
     <string name="privacy_nfc_body">When you tap Pay with NFC on a stored card, your device uses Android Host Card Emulation (HCE) so the key advantage is the ability to pay contactlessly while keeping card numbers encrypted at rest. Ephemeral contactless session tokens live only in RAM and auto-expire after 60 seconds or on vault lock.</string>
+
+    <!-- Forgot Master Password / Erase Vault Reset -->
+    <string name="forgot_password_cta">Forgot Master Password?</string>
+    <string name="forgot_password_dialog_title">ERASE &amp; RESET VAULT?</string>
+    <string name="forgot_password_dialog_body">Because The Black-Box uses zero-knowledge encryption, your Master Password cannot be recovered.\n\nContinuing will permanently erase ALL stored data—including passwords, confidential notes, payment cards, 2FA seeds, cryptographic keys, attachments, and biometric keys.</string>
+    <string name="forgot_password_confirm_hint">Type ERASE to confirm</string>
+    <string name="forgot_password_confirm_cta">ERASE ALL DATA</string>
+    <string name="vault_erased_info">All vault data erased. Create a new Master Password to begin.</string>
 </resources>

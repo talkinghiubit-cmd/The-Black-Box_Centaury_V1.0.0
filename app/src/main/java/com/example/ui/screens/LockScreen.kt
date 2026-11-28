@@ -24,6 +24,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Lock
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -99,6 +102,7 @@ fun LockScreen(
     onInitializeVault: (String, Boolean) -> Unit,
     onTriggerBiometricPrompt: () -> Unit,
     onTriggerVoiceUnlock: () -> Unit = {},
+    onForgotPasswordWipeVault: () -> Unit = {},
     onOpenPrivacyPolicy: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -134,6 +138,7 @@ fun LockScreen(
     } else if (!uiState.isInitialized) {
         VaultSetupView(
             isLoading = uiState.isLoading,
+            infoMessage = uiState.infoMessage,
             errorMessage = uiState.errorMessage,
             isBiometricSupported = isBiometricHardwareAvailable,
             modalityLabel = modalityLabel,
@@ -154,6 +159,7 @@ fun LockScreen(
             onUnlock = onUnlockPassword,
             onTriggerBiometric = onTriggerBiometricPrompt,
             onTriggerVoiceUnlock = onTriggerVoiceUnlock,
+            onForgotPasswordWipeVault = onForgotPasswordWipeVault,
             onOpenPrivacyPolicy = onOpenPrivacyPolicy,
             modifier = modifier
         )
@@ -163,6 +169,7 @@ fun LockScreen(
 @Composable
 private fun VaultSetupView(
     isLoading: Boolean,
+    infoMessage: String? = null,
     errorMessage: String?,
     isBiometricSupported: Boolean,
     modalityLabel: String = "Biometrics",
@@ -397,6 +404,28 @@ private fun VaultSetupView(
                     }
                 }
 
+                if (infoMessage != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(EmeraldNeon.copy(alpha = 0.12f))
+                            .border(1.dp, EmeraldNeon.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("setup_info_banner")
+                    ) {
+                        Text(
+                            text = infoMessage,
+                            color = EmeraldNeon,
+                            fontSize = 12.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
                 if (errorMessage != null) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
@@ -501,11 +530,14 @@ private fun VaultLockedView(
     onUnlock: (String) -> Unit,
     onTriggerBiometric: () -> Unit,
     onTriggerVoiceUnlock: () -> Unit = {},
+    onForgotPasswordWipeVault: () -> Unit = {},
     onOpenPrivacyPolicy: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
+    var showForgotPasswordDialog by remember { mutableStateOf(false) }
+    var confirmEraseText by remember { mutableStateOf("") }
     val isPasswordLockedOut = passwordLockoutRemainingSeconds > 0
     val statusAccent = if (isPasswordLockedOut) CrimsonAlert else EmeraldNeon
 
@@ -838,7 +870,32 @@ private fun VaultLockedView(
                 }
             }
 
-            Spacer(modifier = Modifier.height(22.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            TextButton(
+                onClick = {
+                    confirmEraseText = ""
+                    showForgotPasswordDialog = true
+                },
+                modifier = Modifier.testTag("forgot_master_password_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteForever,
+                    contentDescription = stringResource(R.string.forgot_password_cta),
+                    tint = CrimsonAlert,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(R.string.forgot_password_cta),
+                    fontSize = 12.sp,
+                    fontFamily = BlackBoxMonoFont,
+                    fontWeight = FontWeight.SemiBold,
+                    color = CrimsonAlert
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = stringResource(R.string.strictly_offline_footer),
@@ -867,5 +924,105 @@ private fun VaultLockedView(
                 )
             }
         }
+    }
+
+    if (showForgotPasswordDialog) {
+        val canConfirmErase = confirmEraseText.trim().equals("ERASE", ignoreCase = true)
+        AlertDialog(
+            onDismissRequest = {
+                showForgotPasswordDialog = false
+                confirmEraseText = ""
+            },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.testTag("forgot_password_reset_dialog")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = CrimsonAlert,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.forgot_password_dialog_title),
+                        fontFamily = BlackBoxMonoFont,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = CrimsonAlert
+                    )
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        text = stringResource(R.string.forgot_password_dialog_body),
+                        fontSize = 13.sp,
+                        color = TextSecondary,
+                        lineHeight = 19.sp
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = confirmEraseText,
+                        onValueChange = { confirmEraseText = it },
+                        label = { Text(stringResource(R.string.forgot_password_confirm_hint)) },
+                        placeholder = { Text("ERASE") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CrimsonAlert,
+                            unfocusedBorderColor = BlackBoxBorder,
+                            focusedContainerColor = BlackBoxPitch,
+                            unfocusedContainerColor = BlackBoxPitch,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedLabelColor = CrimsonAlert,
+                            unfocusedLabelColor = TextMuted
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("forgot_password_confirm_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showForgotPasswordDialog = false
+                        confirmEraseText = ""
+                        onForgotPasswordWipeVault()
+                    },
+                    enabled = canConfirmErase,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CrimsonAlert,
+                        contentColor = Color.White,
+                        disabledContainerColor = BlackBoxSurfaceElevated,
+                        disabledContentColor = TextMuted
+                    ),
+                    modifier = Modifier.testTag("forgot_password_confirm_wipe_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.forgot_password_confirm_cta),
+                        fontFamily = BlackBoxMonoFont,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showForgotPasswordDialog = false
+                        confirmEraseText = ""
+                    },
+                    modifier = Modifier.testTag("forgot_password_cancel_button")
+                ) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = BlackBoxSurfaceVariant,
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 }
