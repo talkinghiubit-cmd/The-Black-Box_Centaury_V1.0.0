@@ -23,12 +23,15 @@ import com.example.security.ShareDuration
 import com.example.security.ShareExpiredException
 import com.example.security.ShareDecryptionException
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -1762,5 +1765,377 @@ class ExampleRobolectricTest {
         assertNotNull(cached)
         assertEquals("", cached?.totpSecret)
         com.example.autofill.AutofillVaultSession.clear()
+    }
+
+    @Test
+    fun `test ConfidentialNotesMemoryCache duress isolation and ConfidentialNotesWidgetProvider states`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = BlackBoxDatabase.getDatabase(context)
+        val repo = com.example.data.VaultRepository(db.vaultDao(), db.passwordDao(), db.secureNoteDao())
+        repo.wipeVault()
+
+        val key = repo.initializeVault("WidgetMaster#2026", enableBiometrics = false)
+        val secretNote = VaultItem(
+            id = "widget-note-1",
+            title = "Cold Wallet Seed Backup",
+            category = VaultCategory.NOTE,
+            notes = "word1 word2 word3 ultra secret phrase",
+            isFavorite = true
+        )
+        val regularLogin = VaultItem(
+            id = "widget-login-1",
+            title = "GitHub",
+            category = VaultCategory.LOGIN,
+            username = "octo",
+            password = "pw"
+        )
+        repo.saveItem(secretNote, key, VaultPartition.PRIMARY)
+        repo.saveItem(regularLogin, key, VaultPartition.PRIMARY)
+
+        // Room counts only PRIMARY NOTE rows when vault is locked
+        val sealedCount = com.example.widget.ConfidentialNotesWidgetProvider.querySealedNoteCount(context)
+        assertEquals(1, sealedCount)
+
+        // Locked RemoteViews shows sealed count and unlock action
+        com.example.widget.ConfidentialNotesMemoryCache.clear()
+        val lockedViews = com.example.widget.ConfidentialNotesWidgetProvider.buildRemoteViews(context, sealedCount)
+        assertNotNull(lockedViews)
+        assertFalse(com.example.widget.ConfidentialNotesMemoryCache.isUnlocked())
+
+        // Duress partition MUST never populate widget cache
+        com.example.widget.ConfidentialNotesMemoryCache.updateFromVaultItems(listOf(secretNote), isDuress = true)
+        assertFalse(com.example.widget.ConfidentialNotesMemoryCache.isUnlocked())
+        assertEquals(null, com.example.widget.ConfidentialNotesMemoryCache.getUnlockedNotes())
+
+        // Primary unlock populates ONLY NOTE category items in volatile RAM cache
+        com.example.widget.ConfidentialNotesMemoryCache.updateFromVaultItems(listOf(secretNote, regularLogin), isDuress = false)
+        assertTrue(com.example.widget.ConfidentialNotesMemoryCache.isUnlocked())
+        val cachedNotes = com.example.widget.ConfidentialNotesMemoryCache.getUnlockedNotes()!!
+        assertEquals(1, cachedNotes.size)
+        assertEquals("Cold Wallet Seed Backup", cachedNotes[0].title)
+        assertFalse(com.example.widget.ConfidentialNotesMemoryCache.isPeekRevealed())
+        assertTrue(com.example.widget.ConfidentialNotesMemoryCache.togglePeek())
+
+        val unlockedViews = com.example.widget.ConfidentialNotesWidgetProvider.buildRemoteViews(context, sealedCount)
+        assertNotNull(unlockedViews)
+
+        com.example.widget.ConfidentialNotesMemoryCache.clear()
+        assertFalse(com.example.widget.ConfidentialNotesMemoryCache.isUnlocked())
+    }
+
+    @Test
+    @Suppress("DEPRECATION")
+    fun `test BlackBoxBackgroundScheduler silent maintenance sweep and BlackBoxApplication memory trim`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val hibpDir = java.io.File(context.filesDir, "hibp_cache").apply { mkdirs() }
+        val stalePrefix = java.io.File(hibpDir, "AA001.range").apply {
+            writeText("0000:1")
+            setLastModified(System.currentTimeMillis() - 40L * 24L * 60L * 60L * 1000L)
+        }
+        val freshPrefix = java.io.File(hibpDir, "BB002.range").apply {
+            writeText("0000:1")
+            setLastModified(System.currentTimeMillis())
+        }
+        val exportDir = java.io.File(context.cacheDir, "exports").apply { mkdirs() }
+        val tempExport = java.io.File(exportDir, "orphan_export.html").apply {
+            writeText("<html>temp</html>")
+        }
+
+        // Seed volatile caches; AutofillVaultSession locked/empty triggers widget cache purge during sweep
+        com.example.autofill.AutofillVaultSession.clear()
+        com.example.widget.ConfidentialNotesMemoryCache.updateFromVaultItems(
+            listOf(VaultItem(id = "n1", title = "Secret", category = VaultCategory.NOTE, notes = "Body")),
+            isDuress = false
+        )
+
+        val report = com.example.security.BlackBoxBackgroundScheduler.executeMaintenancePass(context)
+        assertTrue(report.purgedExportsCount >= 1)
+        assertEquals(1, report.prunedHibpFilesCount)
+        assertTrue(report.sessionExpired)
+        assertFalse(tempExport.exists())
+        assertFalse(stalePrefix.exists())
+        assertTrue(freshPrefix.exists())
+        assertFalse(com.example.widget.ConfidentialNotesMemoryCache.isUnlocked())
+
+        val status = com.example.security.BlackBoxBackgroundScheduler.getStatus(context)
+        assertNotNull(status.lastRunAtMillis)
+
+        // Verify OS memory trim purges active unlocked RAM caches
+        com.example.autofill.AutofillVaultSession.updateUnlockedItems(
+            listOf(VaultItem(id = "l1", title = "Bank", category = VaultCategory.LOGIN, username = "u", password = "p")),
+            isDuress = false
+        )
+        com.example.widget.ConfidentialNotesMemoryCache.updateFromVaultItems(
+            listOf(VaultItem(id = "n2", title = "Tax PIN", category = VaultCategory.NOTE, notes = "1234")),
+            isDuress = false
+        )
+        val app = BlackBoxApplication()
+        val attachField = android.app.Application::class.java.getDeclaredMethod("attach", Context::class.java)
+        attachField.isAccessible = true
+        attachField.invoke(app, context)
+        app.handleMemoryPressure(android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+
+        assertFalse(com.example.widget.ConfidentialNotesMemoryCache.isUnlocked())
+        assertFalse(com.example.autofill.AutofillVaultSession.isUnlocked())
+
+        freshPrefix.delete()
+    }
+
+    @Test
+    fun `test TaskAnalyticsEngine tracks started, completed, stopped tasks, OS job stop reasons, and ring buffer cap`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.security.TaskAnalyticsEngine.clearAnalytics(context)
+
+        // 1. Track task start -> active
+        com.example.security.TaskAnalyticsEngine.recordTaskStarted(
+            context = context,
+            taskType = com.example.security.TrackedTaskType.BREACH_AUDIT_SCAN,
+            taskName = "HIBP Breach Audit Scan"
+        )
+        val startedSummary = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(1, startedSummary.activeTasksCount)
+        assertTrue(com.example.security.TrackedTaskType.BREACH_AUDIT_SCAN in startedSummary.activeTaskTypes)
+        assertEquals(0, startedSummary.stoppedTasksCount)
+
+        // 2. Track task stopped -> no longer active, stopped count incremented, stop reason captured
+        val (preemptCode, preemptLabel) = com.example.security.TaskAnalyticsEngine.mapJobStopReason(
+            android.app.job.JobParameters.STOP_REASON_PREEMPT
+        )
+        assertEquals(android.app.job.JobParameters.STOP_REASON_PREEMPT, preemptCode)
+        assertTrue(preemptLabel.contains("Preempted", ignoreCase = true))
+
+        com.example.security.TaskAnalyticsEngine.recordTaskStopped(
+            context = context,
+            taskType = com.example.security.TrackedTaskType.BREACH_AUDIT_SCAN,
+            taskName = "HIBP Breach Audit Scan",
+            stopReasonCode = preemptCode,
+            stopReasonLabel = "Breach scan stopped when vault locked",
+            state = com.example.security.TaskLifecycleState.STOPPED,
+            durationMs = 142L
+        )
+        val stoppedSummary = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(0, stoppedSummary.activeTasksCount)
+        assertEquals(1, stoppedSummary.stoppedTasksCount)
+        assertTrue(com.example.security.TrackedTaskType.BREACH_AUDIT_SCAN in stoppedSummary.stoppedTaskTypes)
+        assertEquals("Breach scan stopped when vault locked", stoppedSummary.lastStoppedEvent?.stopReasonLabel)
+        assertEquals(142L, stoppedSummary.lastStoppedEvent?.durationMs)
+
+        // 3. Verify ring buffer caps recentEvents at 40 entries while counters keep accurate totals
+        for (i in 1..50) {
+            com.example.security.TaskAnalyticsEngine.recordTaskCompleted(
+                context = context,
+                taskType = com.example.security.TrackedTaskType.WIDGET_REFRESH,
+                taskName = "Notes Widget Sync #$i",
+                durationMs = 5L
+            )
+        }
+        val cappedSummary = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(40, cappedSummary.recentEvents.size)
+        assertEquals(50, cappedSummary.completedTasksCount)
+        assertEquals(1, cappedSummary.stoppedTasksCount)
+
+        // 4. Verify zero-knowledge invariant (no secret keys or passwords stored)
+        val rawJson = context.getSharedPreferences("blackbox_task_analytics", Context.MODE_PRIVATE)
+            .getString("task_events_json", "") ?: ""
+        assertFalse(rawJson.contains("password", ignoreCase = true))
+
+        val cleared = com.example.security.TaskAnalyticsEngine.clearAnalytics(context)
+        assertEquals(0, cleared.totalTrackedRuns)
+        assertEquals(0, cleared.stoppedTasksCount)
+        assertTrue(cleared.recentEvents.isEmpty())
+    }
+
+    @Test
+    fun `test TaskAnalyticsEngine integration with BackgroundScheduler, InactivityLockManager, and MemoryPressure`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.security.TaskAnalyticsEngine.clearAnalytics(context)
+
+        // 1. Background maintenance sweep + cancelScheduled
+        com.example.security.BlackBoxBackgroundScheduler.executeMaintenancePass(context)
+        com.example.security.BlackBoxBackgroundScheduler.cancelScheduled(context)
+
+        val afterBgCancel = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(1, afterBgCancel.completedTasksCount)
+        assertEquals(1, afterBgCancel.stoppedTasksCount)
+        assertEquals(
+            com.example.security.TaskLifecycleState.CANCELLED,
+            afterBgCancel.taskStatusByType[com.example.security.TrackedTaskType.BACKGROUND_MAINTENANCE_JOB]
+        )
+
+        // 2. InactivityLockManager start -> stopMonitoring records stopped timer task
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+        val lockManager = com.example.security.InactivityLockManager(scope, context) {}
+        lockManager.startMonitoring()
+        lockManager.stopMonitoring("Test vault locked")
+
+        val afterIdleStop = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(2, afterIdleStop.stoppedTasksCount)
+        assertEquals(
+            com.example.security.TaskLifecycleState.STOPPED,
+            afterIdleStop.taskStatusByType[com.example.security.TrackedTaskType.INACTIVITY_TIMER]
+        )
+        assertEquals("Test vault locked", afterIdleStop.lastStoppedEvent?.stopReasonLabel)
+
+        // 3. OS Memory Trim stopping active RAM caches records APP_PROCESS_TASK stop
+        com.example.widget.ConfidentialNotesMemoryCache.updateFromVaultItems(
+            listOf(VaultItem(id = "n-mem", title = "Secret", category = VaultCategory.NOTE, notes = "Body")),
+            isDuress = false
+        )
+        val app = BlackBoxApplication()
+        val attachField = android.app.Application::class.java.getDeclaredMethod("attach", Context::class.java)
+        attachField.isAccessible = true
+        attachField.invoke(app, context)
+        app.handleMemoryPressure(android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+
+        val afterTrim = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(3, afterTrim.stoppedTasksCount)
+        assertEquals(
+            com.example.security.TaskLifecycleState.STOPPED,
+            afterTrim.taskStatusByType[com.example.security.TrackedTaskType.APP_PROCESS_TASK]
+        )
+        assertTrue(afterTrim.lastStoppedEvent?.stopReasonLabel?.contains("trimMemory") == true)
+    }
+
+    @Test
+    fun `test Pay with NFC network detection, card payload serialization, duress rejection, and TTL lifecycle`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.nfc.NfcPaymentSession.clear()
+        com.example.security.TaskAnalyticsEngine.clearAnalytics(context)
+
+        // 1. Network detection & last-4 formatting
+        assertEquals(com.example.nfc.NfcCardNetwork.VISA, com.example.nfc.NfcPaymentSession.detectCardNetwork("4111 2222 3333 4444"))
+        assertEquals(com.example.nfc.NfcCardNetwork.MASTERCARD, com.example.nfc.NfcPaymentSession.detectCardNetwork("5412 7512 3412 3456"))
+        assertEquals(com.example.nfc.NfcCardNetwork.MASTERCARD, com.example.nfc.NfcPaymentSession.detectCardNetwork("2221 0000 0000 1234"))
+        assertEquals(com.example.nfc.NfcCardNetwork.AMEX, com.example.nfc.NfcPaymentSession.detectCardNetwork("3782 822463 10005"))
+        assertEquals(com.example.nfc.NfcCardNetwork.DISCOVER, com.example.nfc.NfcPaymentSession.detectCardNetwork("6011 1111 1111 1117"))
+        assertEquals("•••• 4444", com.example.nfc.NfcPaymentSession.formatMaskedLast4("4111-2222-3333-4444"))
+
+        // 2. Key strings explicitly communicate Pay with NFC and contactless advantage
+        assertEquals("Pay with NFC", context.getString(R.string.nfc_pay_cta))
+        assertTrue(context.getString(R.string.nfc_pay_advantage_summary).contains("pay contactlessly", ignoreCase = true))
+
+        // 3. VaultItem isNfcPayEnabled encryption/decryption roundtrip
+        val salt = BlackBoxSecurity.generateRandomSalt()
+        val key = BlackBoxSecurity.deriveMasterKey("CardMasterKey99!".toCharArray(), salt)
+        val nfcDisabledCard = VaultItem(
+            id = "card-disabled",
+            title = "Corporate Debit",
+            category = VaultCategory.CARD,
+            cardHolder = "Alex Mercer",
+            cardNumber = "4111222233334444",
+            cardExpiry = "12/29",
+            cardCvv = "888",
+            isNfcPayEnabled = false
+        )
+        val payloadJson = BlackBoxSecurity.serializeItemPayload(nfcDisabledCard)
+        val (cipher, iv) = BlackBoxSecurity.encrypt(payloadJson, key)
+        val decryptedJson = BlackBoxSecurity.decrypt(cipher, iv, key)
+        val restored = BlackBoxSecurity.deserializeItemPayload(
+            id = nfcDisabledCard.id,
+            title = nfcDisabledCard.title,
+            category = nfcDisabledCard.category,
+            isFavorite = false,
+            createdAt = 1L,
+            updatedAt = 2L,
+            jsonString = decryptedJson
+        )
+        assertFalse(restored.isNfcPayEnabled)
+
+        // Backward-compatibility check: legacy card payload without isNfcPayEnabled defaults to true
+        val legacyCardRestored = BlackBoxSecurity.deserializeItemPayload(
+            id = "legacy-card",
+            title = "Legacy Card",
+            category = VaultCategory.CARD,
+            isFavorite = false,
+            createdAt = 1L,
+            updatedAt = 2L,
+            jsonString = """{"cardHolder":"Alex","cardNumber":"4111222233334444","cardExpiry":"12/29","cardCvv":"888"}"""
+        )
+        assertTrue(legacyCardRestored.isNfcPayEnabled)
+
+        // 4. Fail-closed checks: duress mode & disabled card must NEVER arm NFC
+        val nfcEnabledCard = nfcDisabledCard.copy(id = "card-visa", isNfcPayEnabled = true)
+        assertNull(com.example.nfc.NfcPaymentSession.arm(context, nfcEnabledCard, isDuress = true))
+        assertNull(com.example.nfc.NfcPaymentSession.arm(context, nfcDisabledCard, isDuress = false))
+
+        // 5. Arm card and verify TTL expiry + TaskAnalyticsEngine tracking
+        val t0 = 1_000_000L
+        val session = com.example.nfc.NfcPaymentSession.arm(
+            context = context,
+            item = nfcEnabledCard,
+            isDuress = false,
+            ttlMillis = 60_000L,
+            nowMillis = t0
+        )
+        assertNotNull(session)
+        assertEquals(com.example.nfc.NfcCardNetwork.VISA, session!!.network)
+        assertEquals("•••• 4444", session.maskedLast4)
+        assertEquals(60, session.remainingSeconds(t0))
+        assertNotNull(com.example.nfc.NfcPaymentSession.getActiveSession(t0 + 59_000L))
+        assertNull(com.example.nfc.NfcPaymentSession.getActiveSession(t0 + 60_001L))
+
+        val startedSummary = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(1, startedSummary.activeTasksCount)
+        assertTrue(com.example.security.TrackedTaskType.NFC_PAYMENT_SESSION in startedSummary.activeTaskTypes)
+
+        com.example.nfc.NfcPaymentSession.arm(context, nfcEnabledCard, isDuress = false, nowMillis = t0)
+        com.example.nfc.NfcPaymentSession.disarm(context, reason = "User disarmed contactless card")
+        assertNull(com.example.nfc.NfcPaymentSession.getActiveSession(t0))
+        val stoppedSummary = com.example.security.TaskAnalyticsEngine.getSummary(context)
+        assertEquals(1, stoppedSummary.stoppedTasksCount)
+        assertEquals(
+            com.example.security.TaskLifecycleState.STOPPED,
+            stoppedSummary.taskStatusByType[com.example.security.TrackedTaskType.NFC_PAYMENT_SESSION]
+        )
+    }
+
+    @Test
+    fun `test BlackBoxHceService APDU protocol returns 6985 when disarmed and 9000 token when armed`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.nfc.NfcPaymentSession.clear()
+        com.example.security.TaskAnalyticsEngine.clearAnalytics(context)
+
+        val hceService = Robolectric.setupService(com.example.nfc.BlackBoxHceService::class.java)
+        val selectPpseApdu = byteArrayOf(
+            0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E,
+            0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00
+        )
+
+        // When disarmed / locked, HCE MUST fail closed with 69 85 (Conditions not satisfied)
+        val lockedResp = hceService.processCommandApdu(selectPpseApdu, null)
+        assertArrayEquals(com.example.nfc.BlackBoxHceService.STATUS_CONDITIONS_NOT_SATISFIED, lockedResp)
+
+        // Arm a Mastercard record
+        val mastercard = VaultItem(
+            id = "card-mc-1",
+            title = "Travel Mastercard",
+            category = VaultCategory.CARD,
+            cardHolder = "Alex Mercer",
+            cardNumber = "5412751234129876",
+            cardExpiry = "08/28",
+            cardCvv = "123",
+            isNfcPayEnabled = true
+        )
+        val armed = com.example.nfc.NfcPaymentSession.arm(context, mastercard, isDuress = false)!!
+
+        // SELECT APDU succeeds with tokenized contactless payload + 90 00
+        val okResp = hceService.processCommandApdu(selectPpseApdu, null)
+        assertTrue(okResp.size > 2)
+        assertEquals(0x90.toByte(), okResp[okResp.size - 2])
+        assertEquals(0x00.toByte(), okResp[okResp.size - 1])
+        val payload = String(okResp.copyOfRange(0, okResp.size - 2), Charsets.US_ASCII)
+        assertEquals("BBX-MASTERCARD-${armed.tokenReference}", payload)
+        assertEquals(1, com.example.nfc.NfcPaymentSession.getActiveSession()?.tapExchangeCount)
+
+        // Unsupported INS returns 6D 00 while armed
+        val unsupportedInsApdu = byteArrayOf(0x00, 0xB0.toByte(), 0x00, 0x00)
+        assertArrayEquals(
+            com.example.nfc.BlackBoxHceService.STATUS_INS_NOT_SUPPORTED,
+            hceService.processCommandApdu(unsupportedInsApdu, null)
+        )
+
+        // Deactivating after tap disarms RAM session cleanly
+        hceService.onDeactivated(android.nfc.cardemulation.HostApduService.DEACTIVATION_LINK_LOSS)
+        assertNull(com.example.nfc.NfcPaymentSession.getActiveSession())
     }
 }

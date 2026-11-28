@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -20,11 +21,15 @@ import androidx.core.content.FileProvider
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.example.nfc.NfcContactlessHelper
 import com.example.security.BiometricAccessResult
 import com.example.security.BiometricCipherInitResult
 import com.example.security.BiometricManagerWrapper
 import com.example.security.BiometricVaultAuthService
 import com.example.security.ExportFileCleaner
+import com.example.security.TaskAnalyticsEngine
+import com.example.security.TaskLifecycleState
+import com.example.security.TrackedTaskType
 import com.example.ui.VaultViewModel
 import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.PrivacyShieldOverlay
@@ -43,6 +48,7 @@ import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.LockScreen
 import com.example.ui.theme.BlackBoxPitch
 import com.example.ui.theme.BlackBoxTheme
+import com.example.widget.ConfidentialNotesWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -65,12 +71,35 @@ class MainActivity : FragmentActivity() {
         pendingSharedFile = null
         ExportFileCleaner.markShareFinished()
         if (fileToPurge != null) {
-            pendingShareCleanupJob?.cancel()
+            if (pendingShareCleanupJob?.isActive == true) {
+                pendingShareCleanupJob?.cancel()
+                TaskAnalyticsEngine.recordTaskStopped(
+                    context = applicationContext,
+                    taskType = TrackedTaskType.SHARE_CLEANUP,
+                    taskName = "Share Export Cleanup",
+                    stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+                    stopReasonLabel = "Rescheduled by newer export share",
+                    state = TaskLifecycleState.STOPPED
+                )
+            }
+            val startedAt = System.currentTimeMillis()
+            TaskAnalyticsEngine.recordTaskStarted(
+                context = applicationContext,
+                taskType = TrackedTaskType.SHARE_CLEANUP,
+                taskName = "Share Export Cleanup",
+                timestampMillis = startedAt
+            )
             pendingShareCleanupJob = lifecycleScope.launch(Dispatchers.IO) {
                 // Allow receiving app (Drive, Gmail, Files) a brief grace window to stream the FileProvider FD
                 delay(15_000L)
                 ExportFileCleaner.secureDeleteFile(fileToPurge)
                 ExportFileCleaner.clearActiveShare(fileToPurge)
+                TaskAnalyticsEngine.recordTaskCompleted(
+                    context = applicationContext,
+                    taskType = TrackedTaskType.SHARE_CLEANUP,
+                    taskName = "Share Export Cleanup",
+                    durationMs = System.currentTimeMillis() - startedAt
+                )
             }
         }
     }
@@ -94,6 +123,8 @@ class MainActivity : FragmentActivity() {
             onCancelBiometricPrompt = { biometricAuthService.cancelAuthentication() }
         )
 
+        handleWidgetIntent(intent)
+
         setContent {
             BlackBoxTheme {
                 Surface(
@@ -113,6 +144,22 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleWidgetIntent(intent)
+    }
+
+    private fun handleWidgetIntent(intent: Intent?) {
+        val widgetAction = intent?.getStringExtra(ConfidentialNotesWidgetProvider.EXTRA_WIDGET_ACTION)
+        val widgetNoteId = intent?.getStringExtra(ConfidentialNotesWidgetProvider.EXTRA_WIDGET_NOTE_ID)
+        if (!widgetAction.isNullOrBlank()) {
+            viewModel.handleWidgetRequest(widgetAction, widgetNoteId)
+            intent.removeExtra(ConfidentialNotesWidgetProvider.EXTRA_WIDGET_ACTION)
+            intent.removeExtra(ConfidentialNotesWidgetProvider.EXTRA_WIDGET_NOTE_ID)
+        }
+    }
+
     override fun onUserInteraction() {
         super.onUserInteraction()
         viewModel.recordUserInteraction()
@@ -120,7 +167,17 @@ class MainActivity : FragmentActivity() {
 
     override fun onDestroy() {
         if (isFinishing && !isChangingConfigurations) {
-            pendingShareCleanupJob?.cancel()
+            if (pendingShareCleanupJob?.isActive == true) {
+                pendingShareCleanupJob?.cancel()
+                TaskAnalyticsEngine.recordTaskStopped(
+                    context = applicationContext,
+                    taskType = TrackedTaskType.SHARE_CLEANUP,
+                    taskName = "Share Export Cleanup",
+                    stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+                    stopReasonLabel = "Cleanup timer stopped on Activity finish",
+                    state = TaskLifecycleState.STOPPED
+                )
+            }
             ExportFileCleaner.cleanupAllExportsUnconditionally(applicationContext)
         }
         super.onDestroy()
@@ -227,6 +284,20 @@ fun BlackBoxAppContent(
         }
     }
 
+    // Prioritize BlackBoxHceService while user arms "Pay with NFC" in foreground
+    val activity = context as? FragmentActivity
+    val isNfcArmed = uiState.armedNfcSession != null && uiState.isUnlocked && !uiState.isSensitiveContentHidden
+    DisposableEffect(isNfcArmed, activity) {
+        if (isNfcArmed && activity != null) {
+            NfcContactlessHelper.enableForegroundPreferredService(activity)
+        }
+        onDispose {
+            if (isNfcArmed && activity != null) {
+                NfcContactlessHelper.disableForegroundPreferredService(activity)
+            }
+        }
+    }
+
     if (!uiState.isUnlocked) {
         LockScreen(
             uiState = uiState,
@@ -285,6 +356,12 @@ fun BlackBoxAppContent(
                 totpSecondsRemaining = uiState.totpSecondsRemaining,
                 isBreachChecking = uiState.isBreachChecking,
                 activeAttachmentPreview = uiState.activeAttachmentPreview,
+                armedNfcSession = uiState.armedNfcSession,
+                nfcRemainingSeconds = uiState.nfcRemainingSeconds,
+                nfcHardwareStatus = uiState.nfcHardwareStatus,
+                onArmNfcPayment = { viewModel.armNfcPayment(detailItem) },
+                onDisarmNfcPayment = { viewModel.disarmNfcPayment() },
+                onRefreshNfcStatus = { viewModel.refreshNfcStatus() },
                 onEdit = {
                     viewModel.closeItemDetail()
                     viewModel.startEditItem(detailItem)
@@ -338,13 +415,13 @@ fun BlackBoxAppContent(
             )
         }
 
-        // Google Chrome & CSV Password Import Dialog
+        // Multi-Browser (Chrome, Edge, Firefox, Opera) & CSV Password Import Dialog
         if (showCsvImportDialog) {
             CsvImportDialog(
                 preview = uiState.csvImportPreview,
                 isImporting = uiState.isCsvImporting,
-                onInspectCsvUri = { viewModel.inspectCsvFromUri(context, it) },
-                onInspectCsvText = { viewModel.inspectCsvContent(it) },
+                onInspectCsvUri = { uri, preset -> viewModel.inspectCsvFromUri(context, uri, preset) },
+                onInspectCsvText = { csv, preset -> viewModel.inspectCsvContent(csv, preset) },
                 onCommitImport = { skipDups ->
                     viewModel.commitCsvImport(skipDups) {
                         showCsvImportDialog = false
@@ -382,6 +459,10 @@ fun BlackBoxAppContent(
                 onDisableVoiceBiometrics = { pw, cb -> viewModel.disableVoiceBiometrics(pw, cb) },
                 onChangeMasterPassword = { oldPw, newPw, cb -> viewModel.changeMasterPassword(oldPw, newPw, cb) },
                 onSetAutoLockTimeout = { viewModel.setAutoLockTimeout(it) },
+                onToggleBackgroundGuard = { viewModel.toggleBackgroundGuard(it) },
+                onRunBackgroundMaintenance = { viewModel.runBackgroundMaintenanceNow() },
+                onClearTaskAnalytics = { viewModel.clearTaskAnalytics() },
+                onRefreshNfcStatus = { viewModel.refreshNfcStatus() },
                 onSetupDuressPin = { pin, decoys -> viewModel.setupDuressPin(pin, decoys) },
                 onRemoveDuressPin = { viewModel.removeDuressPin() },
                 onOpenSecurityHealth = { showSecurityHealthSheet = true },

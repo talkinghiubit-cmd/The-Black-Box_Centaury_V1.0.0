@@ -214,4 +214,50 @@ class ExampleUnitTest {
         assertTrue(decoys.any { it.category == VaultCategory.NOTE })
         assertTrue(decoys.any { it.category == VaultCategory.CARD })
     }
+
+    @Test
+    fun testMultiBrowserCsvImportChromeEdgeFirefoxOpera() {
+        // 1. Microsoft Edge CSV
+        val edgeCsv = "name,url,username,password,note\n" +
+            "Microsoft 365,https://login.microsoftonline.com,alice@corp.com,EdgeStrong#2026,Work tenant\n"
+        val edgePreview = com.example.security.CsvPasswordImporter.parseFromString(
+            csvContent = edgeCsv,
+            sourceFileName = "microsoft-edge-passwords.csv",
+            browserHint = com.example.security.ImportBrowserPreset.EDGE
+        ).getOrThrow()
+        assertEquals("Microsoft Edge CSV", edgePreview.detectedFormat)
+        assertEquals(1, edgePreview.parsedItems.size)
+        assertEquals("Microsoft 365", edgePreview.parsedItems[0].title)
+        assertEquals("EdgeStrong#2026", edgePreview.parsedItems[0].password)
+
+        // 2. Mozilla Firefox CSV with semicolon delimiter, chrome:// internal row skip, and timePasswordChanged
+        val firefoxCsv = "\"url\";\"username\";\"password\";\"httpRealm\";\"formActionOrigin\";\"guid\";\"timeCreated\";\"timeLastUsed\";\"timePasswordChanged\"\n" +
+            "\"chrome://FirefoxAccounts\";\"internal\";\"skip_me\";\"\";\"\";\"{g1}\";\"1700000000000\";\"1700000000000\";\"1700000000000\"\n" +
+            "\"https://bugzilla.mozilla.org\";\"mozdev\";\"FoxSecret!99\";\"\";\"https://bugzilla.mozilla.org\";\"{g2}\";\"1700000000000\";\"1705000000000\";\"1706000000000\"\n"
+        val firefoxPreview = com.example.security.CsvPasswordImporter.parseFromString(
+            csvContent = firefoxCsv,
+            sourceFileName = "logins.csv",
+            browserHint = com.example.security.ImportBrowserPreset.FIREFOX
+        ).getOrThrow()
+        assertEquals("Mozilla Firefox CSV", firefoxPreview.detectedFormat)
+        assertEquals(1, firefoxPreview.parsedItems.size)
+        assertEquals(1, firefoxPreview.skippedRows)
+        assertEquals("bugzilla.mozilla.org", firefoxPreview.parsedItems[0].title)
+        assertEquals("mozdev", firefoxPreview.parsedItems[0].username)
+        assertEquals("FoxSecret!99", firefoxPreview.parsedItems[0].password)
+        assertEquals(1706000000000L, firefoxPreview.parsedItems[0].passwordUpdatedAt)
+
+        // 3. Opera CSV with tab delimiter
+        val operaCsv = "name\turl\tusername\tpassword\tnote\n" +
+            "Opera Sync\thttps://auth.opera.com\topera_user\tOperaPass!77\tMain account\n"
+        val operaPreview = com.example.security.CsvPasswordImporter.parseFromString(
+            csvContent = operaCsv,
+            sourceFileName = "Opera Passwords.csv",
+            browserHint = com.example.security.ImportBrowserPreset.OPERA
+        ).getOrThrow()
+        assertEquals("Opera CSV", operaPreview.detectedFormat)
+        assertEquals(1, operaPreview.parsedItems.size)
+        assertEquals("Opera Sync", operaPreview.parsedItems[0].title)
+        assertEquals("OperaPass!77", operaPreview.parsedItems[0].password)
+    }
 }

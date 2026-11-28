@@ -56,6 +56,9 @@ interface VaultDao {
     @Query("SELECT COUNT(*) FROM vault_records WHERE partition_id = :partitionId")
     suspend fun getRecordCountByPartition(partitionId: Int = VaultPartition.PRIMARY): Int
 
+    @Query("SELECT COUNT(*) FROM vault_records WHERE partition_id = :partitionId AND category = :category")
+    suspend fun getRecordCountByCategory(partitionId: Int = VaultPartition.PRIMARY, category: String): Int
+
     @Query("SELECT DISTINCT partition_id FROM vault_records ORDER BY partition_id ASC")
     suspend fun getActivePartitionIds(): List<Int>
 

@@ -36,6 +36,7 @@ data class VaultItem(
     val cardNumber: String = "",
     val cardExpiry: String = "",
     val cardCvv: String = "",
+    val isNfcPayEnabled: Boolean = true,
     val keyType: String = "",
     val keyValue: String = "",
     val totpSecret: String = "",

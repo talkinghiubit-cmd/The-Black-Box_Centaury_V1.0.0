@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Contactless
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dangerous
 import androidx.compose.material.icons.filled.Delete
@@ -54,12 +55,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,6 +72,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -80,6 +84,10 @@ import com.example.R
 import com.example.model.VaultAttachment
 import com.example.model.VaultCategory
 import com.example.model.VaultItem
+import com.example.nfc.ArmedNfcCardSession
+import com.example.nfc.NfcContactlessHelper
+import com.example.nfc.NfcHardwareStatus
+import com.example.nfc.NfcPaymentSession
 import com.example.security.TotpAuthenticatorService
 import com.example.security.TotpValidationResult
 import com.example.ui.components.CategoryIcon
@@ -108,6 +116,12 @@ fun ItemDetailSheet(
     totpSecondsRemaining: Int = 30,
     isBreachChecking: Boolean = false,
     activeAttachmentPreview: Pair<VaultAttachment, ByteArray>? = null,
+    armedNfcSession: ArmedNfcCardSession? = null,
+    nfcRemainingSeconds: Int = 0,
+    nfcHardwareStatus: NfcHardwareStatus = NfcHardwareStatus(),
+    onArmNfcPayment: () -> Unit = {},
+    onDisarmNfcPayment: () -> Unit = {},
+    onRefreshNfcStatus: () -> Unit = {},
     onEdit: () -> Unit,
     onShare: () -> Unit = {},
     onDelete: () -> Unit,
@@ -120,10 +134,17 @@ fun ItemDetailSheet(
     onDismissAttachmentPreview: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var passwordRevealed by remember { mutableStateOf(false) }
     var cvvRevealed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(item.id, item.category) {
+        if (item.category == VaultCategory.CARD) {
+            onRefreshNfcStatus()
+        }
+    }
 
     val formattedDate = remember(item.updatedAt) {
         SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.US).format(Date(item.updatedAt))
@@ -589,6 +610,202 @@ fun ItemDetailSheet(
                     )
                 }
                 VaultCategory.CARD -> {
+                    val detectedNetwork = remember(item.cardNumber) {
+                        NfcPaymentSession.detectCardNetwork(item.cardNumber)
+                    }
+                    val maskedLast4 = remember(item.cardNumber) {
+                        NfcPaymentSession.formatMaskedLast4(item.cardNumber)
+                    }
+                    val isThisCardArmed = armedNfcSession?.itemId == item.id && nfcRemainingSeconds > 0
+                    val hasValidDigits = item.cardNumber.filter(Char::isDigit).length >= 4
+                    val panelAccent = if (isThisCardArmed) EmeraldNeon else CyanIce
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(BlackBoxSurfaceVariant)
+                            .border(
+                                1.dp,
+                                panelAccent.copy(alpha = if (isThisCardArmed) 0.7f else 0.4f),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .padding(14.dp)
+                            .testTag("detail_nfc_pay_card")
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Contactless,
+                                    contentDescription = stringResource(R.string.nfc_pay_cta),
+                                    tint = panelAccent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(R.string.nfc_pay_title),
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    color = panelAccent
+                                )
+                            }
+                            SecurityBadge(
+                                text = if (isThisCardArmed) "ARMED ${nfcRemainingSeconds}s" else "${detectedNetwork.displayName} $maskedLast4",
+                                color = if (isThisCardArmed) EmeraldNeon else CyanIce
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = stringResource(R.string.nfc_pay_advantage_summary),
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            lineHeight = 16.sp
+                        )
+
+                        if (isThisCardArmed && armedNfcSession != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(BlackBoxPitch)
+                                    .border(1.dp, EmeraldNeon.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "HOLD PHONE NEAR CONTACTLESS TERMINAL",
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = EmeraldNeon
+                                    )
+                                    Text(
+                                        text = "Session ${armedNfcSession.tokenReference} • ${armedNfcSession.tapExchangeCount} tap(s) • RAM-only",
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = TextMuted
+                                    )
+                                }
+                                Text(
+                                    text = "${nfcRemainingSeconds}s",
+                                    fontSize = 14.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    color = EmeraldNeon
+                                )
+                            }
+                        }
+
+                        if (!item.isNfcPayEnabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Pay with NFC is disabled on this card. Tap Edit to enable contactless payments.",
+                                fontSize = 11.sp,
+                                color = AmberWarning
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (isThisCardArmed) {
+                                    Button(
+                                        onClick = onDisarmNfcPayment,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = BlackBoxSurface,
+                                            contentColor = CrimsonAlert
+                                        ),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .border(1.dp, CrimsonAlert.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                            .testTag("disarm_nfc_button")
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.nfc_pay_disarm_cta),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = onArmNfcPayment,
+                                        enabled = hasValidDigits,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = EmeraldNeon,
+                                            contentColor = Color(0xFF003816)
+                                        ),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .testTag("pay_with_nfc_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Contactless,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = stringResource(R.string.nfc_pay_cta),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                if (nfcHardwareStatus.hasNfcHardware && !nfcHardwareStatus.isNfcEnabled) {
+                                    OutlinedButton(
+                                        onClick = { NfcContactlessHelper.openNfcSettings(context) },
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier
+                                            .height(48.dp)
+                                            .testTag("open_nfc_settings_button")
+                                    ) {
+                                        Text(
+                                            text = "NFC Settings",
+                                            fontSize = 11.sp,
+                                            color = AmberWarning,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                } else if (nfcHardwareStatus.hasHceSupport && !nfcHardwareStatus.isDefaultPaymentService) {
+                                    OutlinedButton(
+                                        onClick = { NfcContactlessHelper.openTapAndPayDefaultSettings(context) },
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier
+                                            .height(48.dp)
+                                            .testTag("open_tap_and_pay_button")
+                                    ) {
+                                        Text(
+                                            text = "Tap & Pay",
+                                            fontSize = 11.sp,
+                                            color = CyanIce,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     if (item.cardHolder.isNotEmpty()) {
                         DetailFieldRow(
                             label = "Cardholder",

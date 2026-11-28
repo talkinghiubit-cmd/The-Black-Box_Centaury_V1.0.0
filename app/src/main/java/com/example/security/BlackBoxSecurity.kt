@@ -211,6 +211,7 @@ object BlackBoxSecurity {
         json.put("cardNumber", item.cardNumber)
         json.put("cardExpiry", item.cardExpiry)
         json.put("cardCvv", item.cardCvv)
+        json.put("isNfcPayEnabled", item.isNfcPayEnabled)
         json.put("keyType", item.keyType)
         json.put("keyValue", item.keyValue)
         json.put("totpSecret", item.totpSecret)
@@ -243,6 +244,7 @@ object BlackBoxSecurity {
             cardNumber = json.optString("cardNumber", ""),
             cardExpiry = json.optString("cardExpiry", ""),
             cardCvv = json.optString("cardCvv", ""),
+            isNfcPayEnabled = json.optBoolean("isNfcPayEnabled", true),
             keyType = json.optString("keyType", ""),
             keyValue = json.optString("keyValue", ""),
             totpSecret = json.optString("totpSecret", ""),

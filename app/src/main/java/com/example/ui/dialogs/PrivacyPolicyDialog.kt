@@ -152,6 +152,11 @@ fun PrivacyPolicyDialog(
                 title = stringResource(R.string.privacy_autofill_title),
                 body = stringResource(R.string.privacy_autofill_body)
             )
+            Spacer(modifier = Modifier.height(10.dp))
+            PrivacyDisclosureBlock(
+                title = stringResource(R.string.privacy_nfc_title),
+                body = stringResource(R.string.privacy_nfc_body)
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 

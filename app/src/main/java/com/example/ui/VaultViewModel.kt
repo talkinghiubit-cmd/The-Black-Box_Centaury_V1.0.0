@@ -23,9 +23,15 @@ import com.example.model.VaultAttachment
 import com.example.model.VaultCategory
 import com.example.model.VaultHealthReport
 import com.example.model.VaultItem
+import com.example.nfc.ArmedNfcCardSession
+import com.example.nfc.NfcContactlessHelper
+import com.example.nfc.NfcHardwareStatus
+import com.example.nfc.NfcPaymentSession
 import com.example.security.AttachmentStorageManager
+import com.example.security.BackgroundGuardStatus
 import com.example.security.BiometricAuthHelper
 import com.example.security.BiometricCipherInitResult
+import com.example.security.BlackBoxBackgroundScheduler
 import com.example.security.BlackBoxSecurity
 import com.example.security.BreachCheckResult
 import com.example.security.BreachChecker
@@ -37,6 +43,7 @@ import com.example.security.DecryptedSharedItem
 import com.example.security.EncryptedShareCapsule
 import com.example.security.ExportFileCleaner
 import com.example.security.HtmlVaultExporter
+import com.example.security.ImportBrowserPreset
 import com.example.security.InactivityLockManager
 import com.example.security.OfflineHibpStats
 import com.example.security.OfflineHibpStore
@@ -46,13 +53,21 @@ import com.example.security.SecureShareManager
 import com.example.security.SecurityHealthAnalyzer
 import com.example.security.SnapshotManager
 import com.example.security.SnapshotPackage
+import com.example.security.TaskAnalyticsEngine
+import com.example.security.TaskAnalyticsSummary
+import com.example.security.TaskLifecycleState
 import com.example.security.TotpAuthenticatorService
 import com.example.security.TotpSeedValidationResult
 import com.example.security.TotpToken
 import com.example.security.TotpValidationResult
+import com.example.security.TrackedTaskType
 import com.example.security.UnlockBackoffManager
 import com.example.security.VoiceprintTemplate
+import com.example.widget.ConfidentialNotesMemoryCache
+import com.example.widget.ConfidentialNotesWidgetProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -122,6 +137,16 @@ data class VaultUiState(
     val isSensitiveContentHidden: Boolean = false,
     val isAppInBackground: Boolean = false,
     val requiresBiometricReauth: Boolean = false,
+    val backgroundGuardStatus: BackgroundGuardStatus = BackgroundGuardStatus(
+        isEnabled = true,
+        isJobScheduled = false,
+        lastRunAtMillis = null,
+        lastCleanedItemsCount = 0
+    ),
+    val taskAnalytics: TaskAnalyticsSummary = TaskAnalyticsSummary(),
+    val armedNfcSession: ArmedNfcCardSession? = null,
+    val nfcRemainingSeconds: Int = 0,
+    val nfcHardwareStatus: NfcHardwareStatus = NfcHardwareStatus(),
     val healthReport: VaultHealthReport = VaultHealthReport(100, 0, 0, 0, 0, 0, 0),
     val infoMessage: String? = null,
     val errorMessage: String? = null
@@ -134,19 +159,28 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private var sessionSecretKey: SecretKey? = null
     private var cachedMasterPassword: String = ""
     private var failedVoiceAttempts: Int = 0
-    private var voiceLockoutJob: kotlinx.coroutines.Job? = null
-    private var passwordLockoutJob: kotlinx.coroutines.Job? = null
+    private var voiceLockoutJob: Job? = null
+    private var passwordLockoutJob: Job? = null
+    private var totpTickerJob: Job? = null
+    private var breachAuditJob: Job? = null
+    private var breachAuditStartedAtMillis: Long = 0L
     private var observedLifecycle: Lifecycle? = null
     private var lifecycleEventObserver: LifecycleEventObserver? = null
     private var activeBiometricManager: com.example.security.BiometricManagerWrapper? = null
     private var pendingReauthCallback: (() -> Unit)? = null
     private var hasTriggeredReauthForCurrentResume: Boolean = false
+    private var pendingWidgetAction: String? = null
+    private var pendingWidgetNoteId: String? = null
 
-    private val inactivityLockManager = InactivityLockManager(viewModelScope) {
+    private val inactivityLockManager = InactivityLockManager(viewModelScope, application) {
         lockVault()
     }
 
-    private val _uiState = MutableStateFlow(VaultUiState())
+    private val _uiState = MutableStateFlow(
+        VaultUiState(
+            taskAnalytics = TaskAnalyticsEngine.getSummary(application)
+        )
+    )
     val uiState: StateFlow<VaultUiState> = _uiState.asStateFlow()
 
     private val _biometricReauthRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -159,6 +193,21 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             passwordDao = database.passwordDao(),
             secureNoteDao = database.secureNoteDao()
         )
+        viewModelScope.launch {
+            TaskAnalyticsEngine.summaryFlow.collect { summary ->
+                _uiState.update { it.copy(taskAnalytics = summary) }
+            }
+        }
+        viewModelScope.launch {
+            NfcPaymentSession.sessionFlow.collect { session ->
+                _uiState.update {
+                    it.copy(
+                        armedNfcSession = session,
+                        nfcRemainingSeconds = session?.remainingSeconds() ?: 0
+                    )
+                }
+            }
+        }
         generatePassword()
         checkInitialization()
         refreshOfflineHibpStatus()
@@ -166,10 +215,32 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startTotpTicker() {
-        viewModelScope.launch {
+        totpTickerJob?.cancel()
+        TaskAnalyticsEngine.recordTaskStarted(
+            context = getApplication(),
+            taskType = TrackedTaskType.TOTP_TICKER,
+            taskName = "TOTP 2FA Live Ticker"
+        )
+        totpTickerJob = viewModelScope.launch {
             while (true) {
+                val now = System.currentTimeMillis()
+                val trackedArmed = _uiState.value.armedNfcSession
+                if (trackedArmed != null && now >= trackedArmed.expiresAtMillis) {
+                    NfcPaymentSession.disarm(
+                        context = getApplication(),
+                        reason = "Contactless NFC window expired (60s)",
+                        expired = true
+                    )
+                }
+                val activeNfc = NfcPaymentSession.getActiveSession(now)
                 val remaining = TotpAuthenticatorService.getRemainingSeconds()
-                _uiState.update { it.copy(totpSecondsRemaining = remaining) }
+                _uiState.update {
+                    it.copy(
+                        totpSecondsRemaining = remaining,
+                        armedNfcSession = activeNfc,
+                        nfcRemainingSeconds = activeNfc?.remainingSeconds(now) ?: 0
+                    )
+                }
                 delay(1000)
             }
         }
@@ -203,11 +274,18 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 ExportFileCleaner.cleanupIdleExports(getApplication())
+                BlackBoxBackgroundScheduler.ensureScheduledIfEnabled(getApplication())
             }
             val metadata = repository.getMetadata()
             val initialized = metadata != null && metadata.isVaultInitialized
             val timeout = metadata?.autoLockMinutes ?: 5
             val backoffState = unlockBackoffManager.getState()
+            val bgStatus = withContext(Dispatchers.IO) {
+                BlackBoxBackgroundScheduler.getStatus(getApplication())
+            }
+            val nfcStatus = withContext(Dispatchers.IO) {
+                NfcContactlessHelper.queryHardwareStatus(getApplication())
+            }
             inactivityLockManager.setTimeoutMinutes(timeout)
             AutofillVaultSession.updateMaxIdleMinutes(timeout)
             _uiState.update {
@@ -219,6 +297,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     autoLockMinutes = timeout,
                     failedPasswordAttempts = backoffState.failedAttempts,
                     passwordLockoutRemainingSeconds = backoffState.lockoutRemainingSeconds,
+                    backgroundGuardStatus = bgStatus,
+                    nfcHardwareStatus = nfcStatus,
                     isLoading = false
                 )
             }
@@ -246,7 +326,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 cachedMasterPassword = masterPassword
                 inactivityLockManager.startMonitoring()
                 val items = repository.getAllDecryptedItems(key, partitionId = 0)
-                AutofillVaultSession.updateUnlockedItems(items, isDuress = false)
+                syncUnlockedSessions(items, isDuress = false)
                 val health = computeHealthReport(items)
                 _uiState.update {
                     it.copy(
@@ -267,6 +347,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 applyFilter()
+                executePendingWidgetActionIfReady()
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -302,7 +383,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 cachedMasterPassword = masterPassword
                 inactivityLockManager.startMonitoring()
                 val items = repository.getAllDecryptedItems(result.secretKey, result.partitionId)
-                AutofillVaultSession.updateUnlockedItems(items, isDuress = result.isDuress)
+                syncUnlockedSessions(items, isDuress = result.isDuress)
                 val health = computeHealthReport(items)
                 _uiState.update {
                     it.copy(
@@ -322,6 +403,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 applyFilter()
+                executePendingWidgetActionIfReady()
             } else {
                 val nextBackoff = unlockBackoffManager.recordFailure()
                 if (nextBackoff.isLockedOut) {
@@ -387,7 +469,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 cachedMasterPassword = masterPassword
                 inactivityLockManager.startMonitoring()
                 val items = repository.getAllDecryptedItems(key, partitionId = 0)
-                AutofillVaultSession.updateUnlockedItems(items, isDuress = false)
+                syncUnlockedSessions(items, isDuress = false)
                 val health = computeHealthReport(items)
                 _uiState.update {
                     it.copy(
@@ -406,6 +488,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 applyFilter()
+                executePendingWidgetActionIfReady()
             } else {
                 val persistedBioEnabled = repository.getMetadata()?.isBiometricEnabled == true
                 val message = if (!persistedBioEnabled) {
@@ -427,9 +510,29 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun lockVault() {
         inactivityLockManager.stopMonitoring()
+        if (breachAuditJob?.isActive == true) {
+            breachAuditJob?.cancel()
+            breachAuditJob = null
+            val elapsed = if (breachAuditStartedAtMillis > 0L) System.currentTimeMillis() - breachAuditStartedAtMillis else null
+            TaskAnalyticsEngine.recordTaskStopped(
+                context = getApplication(),
+                taskType = TrackedTaskType.BREACH_AUDIT_SCAN,
+                taskName = "HIBP Breach Audit Scan",
+                stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+                stopReasonLabel = "Breach scan stopped when vault locked",
+                state = TaskLifecycleState.STOPPED,
+                durationMs = elapsed
+            )
+        }
         sessionSecretKey = null
         cachedMasterPassword = ""
+        NfcPaymentSession.disarm(
+            context = getApplication(),
+            reason = "Vault locked — NFC contactless session disarmed"
+        )
         AutofillVaultSession.clear()
+        ConfidentialNotesMemoryCache.clear()
+        ConfidentialNotesWidgetProvider.refreshAllWidgets(getApplication())
         viewModelScope.launch(Dispatchers.IO) {
             ExportFileCleaner.cleanupIdleExports(getApplication())
         }
@@ -452,6 +555,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 isCreatingNewItem = false,
                 isBreachChecking = false,
                 breachScanProgress = null,
+                armedNfcSession = null,
+                nfcRemainingSeconds = 0,
                 infoMessage = "Vault locked. Sensitive keys purged from memory."
             )
         }
@@ -482,6 +587,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(isSensitiveContentHidden = false)
         }
+        executePendingWidgetActionIfReady()
     }
 
     /**
@@ -569,9 +675,22 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 onCancelBiometricPrompt()
                 biometricManager?.cancelAuthentication()
                 onAppBackgrounded()
+                TaskAnalyticsEngine.recordTaskStopped(
+                    context = getApplication(),
+                    taskType = TrackedTaskType.APP_PROCESS_TASK,
+                    taskName = "UI Foreground Task",
+                    stopReasonCode = TaskAnalyticsEngine.STOP_REASON_LIFECYCLE_BACKGROUND,
+                    stopReasonLabel = "Activity ON_STOP moved app to background",
+                    state = TaskLifecycleState.STOPPED
+                )
             }
             Lifecycle.Event.ON_START -> {
                 onAppForegrounded()
+                TaskAnalyticsEngine.recordTaskStarted(
+                    context = getApplication(),
+                    taskType = TrackedTaskType.APP_PROCESS_TASK,
+                    taskName = "UI Foreground Task"
+                )
             }
             Lifecycle.Event.ON_RESUME -> {
                 onAppForegrounded()
@@ -625,12 +744,48 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         detachLifecycleMonitor()
-        inactivityLockManager.stopMonitoring()
+        inactivityLockManager.stopMonitoring("ViewModel cleared — inactivity monitor stopped")
+        if (totpTickerJob?.isActive == true) {
+            totpTickerJob?.cancel()
+            TaskAnalyticsEngine.recordTaskStopped(
+                context = getApplication(),
+                taskType = TrackedTaskType.TOTP_TICKER,
+                taskName = "TOTP 2FA Live Ticker",
+                stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+                stopReasonLabel = "ViewModel cleared — TOTP 2FA ticker stopped",
+                state = TaskLifecycleState.STOPPED
+            )
+        }
+        if (breachAuditJob?.isActive == true) {
+            breachAuditJob?.cancel()
+            TaskAnalyticsEngine.recordTaskStopped(
+                context = getApplication(),
+                taskType = TrackedTaskType.BREACH_AUDIT_SCAN,
+                taskName = "HIBP Breach Audit Scan",
+                stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+                stopReasonLabel = "ViewModel cleared during breach scan",
+                state = TaskLifecycleState.STOPPED
+            )
+        }
+        TaskAnalyticsEngine.recordTaskStopped(
+            context = getApplication(),
+            taskType = TrackedTaskType.APP_PROCESS_TASK,
+            taskName = "Main UI ViewModel",
+            stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+            stopReasonLabel = "VaultViewModel destroyed (onCleared)",
+            state = TaskLifecycleState.STOPPED
+        )
         voiceLockoutJob?.cancel()
         passwordLockoutJob?.cancel()
         sessionSecretKey = null
         cachedMasterPassword = ""
+        NfcPaymentSession.disarm(
+            context = getApplication(),
+            reason = "VaultViewModel destroyed — NFC contactless session disarmed"
+        )
         AutofillVaultSession.clear()
+        ConfidentialNotesMemoryCache.clear()
+        ConfidentialNotesWidgetProvider.refreshAllWidgets(getApplication())
         super.onCleared()
     }
 
@@ -779,7 +934,9 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         val key = sessionSecretKey ?: return
         if (_uiState.value.isBreachChecking) return
         val ctx = getApplication<Application>()
-        viewModelScope.launch {
+        val startedAt = System.currentTimeMillis()
+        breachAuditStartedAtMillis = startedAt
+        breachAuditJob = viewModelScope.launch {
             val loginTargets = _uiState.value.decryptedItems.filter {
                 it.category == VaultCategory.LOGIN && it.password.isNotEmpty()
             }
@@ -789,6 +946,13 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 return@launch
             }
+
+            TaskAnalyticsEngine.recordTaskStarted(
+                context = ctx,
+                taskType = TrackedTaskType.BREACH_AUDIT_SCAN,
+                taskName = "HIBP Breach Audit Scan",
+                timestampMillis = startedAt
+            )
 
             val onlineNow = withContext(Dispatchers.IO) { OfflineHibpStore.isNetworkAvailable(ctx) }
             _uiState.update {
@@ -827,6 +991,25 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 val allFailed = summary.errorCount > 0 && summary.checkedCount == 0
                 val partialErrors = summary.errorCount > 0 && summary.checkedCount > 0
                 val allOfflineUnverified = summary.wasOfflineMode && summary.checkedCount == 0 && summary.offlineUnverifiedCount > 0
+                val elapsed = System.currentTimeMillis() - startedAt
+
+                if (allFailed) {
+                    TaskAnalyticsEngine.recordTaskFailed(
+                        context = ctx,
+                        taskType = TrackedTaskType.BREACH_AUDIT_SCAN,
+                        taskName = "HIBP Breach Audit Scan",
+                        reasonLabel = "Unable to reach HIBP and no cached prefixes",
+                        durationMs = elapsed
+                    )
+                } else {
+                    TaskAnalyticsEngine.recordTaskCompleted(
+                        context = ctx,
+                        taskType = TrackedTaskType.BREACH_AUDIT_SCAN,
+                        taskName = "HIBP Breach Audit Scan",
+                        durationMs = elapsed,
+                        note = "${summary.checkedCount} audited"
+                    )
+                }
 
                 _uiState.update {
                     it.copy(
@@ -864,7 +1047,10 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 applyFilter()
+            } catch (_: CancellationException) {
+                // Stop reason already recorded if cancelled on lock/destroy
             } finally {
+                breachAuditJob = null
                 _uiState.update {
                     it.copy(isBreachChecking = false, breachScanProgress = null)
                 }
@@ -1139,7 +1325,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
             repository.saveItem(updatedItem, key, partitionId)
             val updatedList = repository.getAllDecryptedItems(key, partitionId)
-            AutofillVaultSession.updateUnlockedItems(updatedList, isDuress = _uiState.value.isDuressMode)
+            syncUnlockedSessions(updatedList, isDuress = _uiState.value.isDuressMode)
             val health = computeHealthReport(updatedList)
             _uiState.update {
                 it.copy(
@@ -1161,7 +1347,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.deleteItem(id, partitionId)
             val updated = repository.getAllDecryptedItems(key, partitionId)
-            AutofillVaultSession.updateUnlockedItems(updated, isDuress = _uiState.value.isDuressMode)
+            syncUnlockedSessions(updated, isDuress = _uiState.value.isDuressMode)
             val health = computeHealthReport(updated)
             _uiState.update {
                 it.copy(
@@ -1181,6 +1367,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.toggleFavorite(id, partitionId)
             val updated = repository.getAllDecryptedItems(key, partitionId)
+            syncUnlockedSessions(updated, isDuress = _uiState.value.isDuressMode)
             _uiState.update {
                 it.copy(
                     decryptedItems = updated,
@@ -1285,7 +1472,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             )
             repository.saveItem(newItem, key, partitionId)
             val updated = repository.getAllDecryptedItems(key, partitionId)
-            AutofillVaultSession.updateUnlockedItems(updated, isDuress = _uiState.value.isDuressMode)
+            syncUnlockedSessions(updated, isDuress = _uiState.value.isDuressMode)
             val health = computeHealthReport(updated)
             _uiState.update {
                 it.copy(
@@ -1483,7 +1670,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 repository.mergeEntities(preview.records, partitionId)
             }
             val updated = repository.getAllDecryptedItems(key, partitionId)
-            AutofillVaultSession.updateUnlockedItems(updated, isDuress = _uiState.value.isDuressMode)
+            syncUnlockedSessions(updated, isDuress = _uiState.value.isDuressMode)
             val health = computeHealthReport(updated)
             _uiState.update {
                 it.copy(
@@ -1502,13 +1689,13 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // Google Chrome & RFC-4180 CSV Password Import
+    // Multi-Browser (Chrome, Edge, Firefox, Opera) & RFC-4180 CSV Import
     // =========================================================================
 
-    fun inspectCsvFromUri(context: Context, uri: Uri) {
+    fun inspectCsvFromUri(context: Context, uri: Uri, browserHint: ImportBrowserPreset? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             val existing = _uiState.value.decryptedItems
-            val result = CsvPasswordImporter.parseFromUri(context, uri, existing)
+            val result = CsvPasswordImporter.parseFromUri(context, uri, existing, browserHint)
             if (result.isSuccess) {
                 val preview = result.getOrThrow()
                 _uiState.update {
@@ -1525,10 +1712,16 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun inspectCsvContent(csvContent: String) {
+    fun inspectCsvContent(csvContent: String, browserHint: ImportBrowserPreset? = null) {
         viewModelScope.launch(Dispatchers.Default) {
             val existing = _uiState.value.decryptedItems
-            val result = CsvPasswordImporter.parseFromString(csvContent, "pasted_chrome_export.csv", existing)
+            val defaultName = when (browserHint) {
+                ImportBrowserPreset.EDGE -> "pasted_edge_passwords.csv"
+                ImportBrowserPreset.FIREFOX -> "pasted_firefox_logins.csv"
+                ImportBrowserPreset.OPERA -> "pasted_opera_passwords.csv"
+                ImportBrowserPreset.CHROME, null -> "pasted_chrome_export.csv"
+            }
+            val result = CsvPasswordImporter.parseFromString(csvContent, defaultName, existing, browserHint)
             if (result.isSuccess) {
                 val preview = result.getOrThrow()
                 _uiState.update {
@@ -1561,7 +1754,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 repository.saveItemsBatch(itemsToImport, key, partitionId)
             }
             val updated = repository.getAllDecryptedItems(key, partitionId)
-            AutofillVaultSession.updateUnlockedItems(updated, isDuress = _uiState.value.isDuressMode)
+            syncUnlockedSessions(updated, isDuress = _uiState.value.isDuressMode)
             val health = computeHealthReport(updated)
             _uiState.update {
                 it.copy(
@@ -1686,7 +1879,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     cachedMasterPassword = outcome.masterPassword
                     inactivityLockManager.startMonitoring()
                     val items = repository.getAllDecryptedItems(outcome.secretKey, partitionId = 0)
-                    AutofillVaultSession.updateUnlockedItems(items, isDuress = false)
+                    syncUnlockedSessions(items, isDuress = false)
                     val health = computeHealthReport(items)
                     _uiState.update {
                         it.copy(
@@ -1708,6 +1901,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     applyFilter()
+                    executePendingWidgetActionIfReady()
                 }
                 is VoiceUnlockOutcome.Rejected -> {
                     failedVoiceAttempts++
@@ -1805,6 +1999,10 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun wipeEntireVault() {
         viewModelScope.launch {
+            NfcPaymentSession.disarm(
+                context = getApplication(),
+                reason = "Vault wiped — NFC contactless session disarmed"
+            )
             repository.wipeVault()
             withContext(Dispatchers.IO) {
                 ExportFileCleaner.cleanupAllExportsUnconditionally(getApplication())
@@ -1812,6 +2010,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             unlockBackoffManager.reset()
             passwordLockoutJob?.cancel()
             AutofillVaultSession.clear()
+            ConfidentialNotesMemoryCache.clear()
+            ConfidentialNotesWidgetProvider.refreshAllWidgets(getApplication())
             sessionSecretKey = null
             cachedMasterPassword = ""
             _uiState.update {
@@ -1819,7 +2019,181 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     isInitialized = false,
                     isUnlocked = false,
                     isLoading = false,
+                    backgroundGuardStatus = BlackBoxBackgroundScheduler.getStatus(getApplication()),
+                    nfcHardwareStatus = NfcContactlessHelper.queryHardwareStatus(getApplication()),
                     infoMessage = "Vault wiped cleanly"
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // Pay with NFC (Contactless Host Card Emulation) Controls
+    // =========================================================================
+
+    fun refreshNfcStatus() {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val status = NfcContactlessHelper.queryHardwareStatus(ctx)
+            _uiState.update { it.copy(nfcHardwareStatus = status) }
+        }
+    }
+
+    fun armNfcPayment(item: VaultItem) {
+        val state = _uiState.value
+        val ctx = getApplication<Application>()
+        if (state.isDuressMode) {
+            _uiState.update {
+                it.copy(errorMessage = "Pay with NFC is disabled in decoy partition mode.")
+            }
+            return
+        }
+        if (item.category != VaultCategory.CARD || !item.isNfcPayEnabled) {
+            _uiState.update {
+                it.copy(errorMessage = "Enable Pay with NFC on this card record to pay contactlessly.")
+            }
+            return
+        }
+        if (item.cardNumber.filter(Char::isDigit).length < 4) {
+            _uiState.update {
+                it.copy(errorMessage = "Add a valid card number before arming Pay with NFC.")
+            }
+            return
+        }
+        val hardware = NfcContactlessHelper.queryHardwareStatus(ctx)
+        _uiState.update { it.copy(nfcHardwareStatus = hardware) }
+        if (hardware.hasNfcHardware && !hardware.isNfcEnabled) {
+            _uiState.update {
+                it.copy(errorMessage = "Turn on Android NFC in system settings to pay contactlessly.")
+            }
+            return
+        }
+        val session = NfcPaymentSession.arm(
+            context = ctx,
+            item = item,
+            isDuress = state.isDuressMode
+        )
+        if (session != null) {
+            _uiState.update {
+                it.copy(
+                    armedNfcSession = session,
+                    nfcRemainingSeconds = session.remainingSeconds(),
+                    infoMessage = "Pay with NFC armed (${session.network.displayName} ${session.maskedLast4}) — hold near terminal to pay contactlessly"
+                )
+            }
+        }
+    }
+
+    fun disarmNfcPayment(reason: String = "NFC payment disarmed by user") {
+        NfcPaymentSession.disarm(
+            context = getApplication(),
+            reason = reason,
+            expired = false
+        )
+        _uiState.update {
+            it.copy(
+                armedNfcSession = null,
+                nfcRemainingSeconds = 0,
+                infoMessage = "NFC contactless session disarmed"
+            )
+        }
+    }
+
+    // =========================================================================
+    // Confidential Notes Widget & Silent Background Guard Helpers
+    // =========================================================================
+
+    private fun syncUnlockedSessions(items: List<VaultItem>, isDuress: Boolean) {
+        AutofillVaultSession.updateUnlockedItems(items, isDuress = isDuress)
+        ConfidentialNotesMemoryCache.updateFromVaultItems(items, isDuress = isDuress)
+        ConfidentialNotesWidgetProvider.refreshAllWidgets(getApplication())
+    }
+
+    fun handleWidgetRequest(action: String?, noteId: String?) {
+        if (action.isNullOrBlank()) return
+        pendingWidgetAction = action
+        pendingWidgetNoteId = noteId
+        executePendingWidgetActionIfReady()
+    }
+
+    private fun executePendingWidgetActionIfReady() {
+        val action = pendingWidgetAction ?: return
+        val state = _uiState.value
+        if (!state.isUnlocked || state.isSensitiveContentHidden) return
+        val targetNoteId = pendingWidgetNoteId
+        pendingWidgetAction = null
+        pendingWidgetNoteId = null
+
+        when (action) {
+            ConfidentialNotesWidgetProvider.WIDGET_ACTION_OPEN_NOTES -> {
+                setCategoryFilter(VaultCategory.NOTE)
+            }
+            ConfidentialNotesWidgetProvider.WIDGET_ACTION_NEW_NOTE -> {
+                setCategoryFilter(VaultCategory.NOTE)
+                startCreateNewItem(VaultCategory.NOTE)
+            }
+            ConfidentialNotesWidgetProvider.WIDGET_ACTION_OPEN_NOTE_ID -> {
+                setCategoryFilter(VaultCategory.NOTE)
+                val target = state.decryptedItems.firstOrNull { it.id == targetNoteId }
+                if (target != null) {
+                    openItemDetail(target)
+                }
+            }
+        }
+    }
+
+    fun toggleBackgroundGuard(enabled: Boolean) {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            BlackBoxBackgroundScheduler.setEnabled(ctx, enabled)
+            val status = BlackBoxBackgroundScheduler.getStatus(ctx)
+            _uiState.update {
+                it.copy(
+                    backgroundGuardStatus = status,
+                    infoMessage = if (enabled) {
+                        "Silent Background Guard enabled (battery-friendly OS JobScheduler)"
+                    } else {
+                        "Silent Background Guard paused"
+                    }
+                )
+            }
+        }
+    }
+
+    fun runBackgroundMaintenanceNow() {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val report = BlackBoxBackgroundScheduler.executeMaintenancePass(ctx)
+            val status = BlackBoxBackgroundScheduler.getStatus(ctx)
+            val stats = OfflineHibpStore.getStats(ctx)
+            val analytics = TaskAnalyticsEngine.getSummary(ctx)
+            _uiState.update {
+                it.copy(
+                    backgroundGuardStatus = status,
+                    offlineHibpStats = stats,
+                    taskAnalytics = analytics,
+                    infoMessage = "Silent sweep complete (${report.purgedExportsCount} temp export(s), ${report.prunedHibpFilesCount} stale cache file(s) purged)"
+                )
+            }
+        }
+    }
+
+    fun refreshTaskAnalytics() {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val summary = TaskAnalyticsEngine.getSummary(ctx)
+            _uiState.update { it.copy(taskAnalytics = summary) }
+        }
+    }
+
+    fun clearTaskAnalytics() {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val cleared = TaskAnalyticsEngine.clearAnalytics(ctx)
+            _uiState.update {
+                it.copy(
+                    taskAnalytics = cleared,
+                    infoMessage = "Cleared on-device task stop telemetry log"
                 )
             }
         }

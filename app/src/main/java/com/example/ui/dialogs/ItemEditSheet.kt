@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Contactless
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Visibility
@@ -38,6 +39,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -78,6 +81,7 @@ import com.example.ui.theme.BlackBoxSurfaceVariant
 import com.example.ui.theme.CrimsonAlert
 import com.example.ui.theme.CyanIce
 import com.example.ui.theme.EmeraldContainer
+import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldNeon
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
@@ -105,6 +109,7 @@ fun ItemEditSheet(
     var cardNumber by remember { mutableStateOf(item.cardNumber) }
     var cardExpiry by remember { mutableStateOf(item.cardExpiry) }
     var cardCvv by remember { mutableStateOf(item.cardCvv) }
+    var isNfcPayEnabled by remember { mutableStateOf(item.isNfcPayEnabled) }
     var keyType by remember { mutableStateOf(if (item.keyType.isNotEmpty()) item.keyType else "SSH-ED25519") }
     var keyValue by remember { mutableStateOf(item.keyValue) }
     var isFavorite by remember { mutableStateOf(item.isFavorite) }
@@ -540,6 +545,60 @@ fun ItemEditSheet(
                                 .testTag("edit_cardcvv_input")
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(BlackBoxSurfaceVariant)
+                            .border(
+                                1.dp,
+                                if (isNfcPayEnabled) EmeraldNeon.copy(alpha = 0.45f) else BlackBoxBorder,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Contactless,
+                                contentDescription = stringResource(R.string.nfc_pay_cta),
+                                tint = if (isNfcPayEnabled) EmeraldNeon else TextMuted,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = stringResource(R.string.nfc_pay_cta),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = stringResource(R.string.nfc_pay_advantage_summary),
+                                    fontSize = 11.sp,
+                                    color = TextMuted,
+                                    lineHeight = 15.sp
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = isNfcPayEnabled,
+                            onCheckedChange = { isNfcPayEnabled = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = EmeraldNeon,
+                                checkedTrackColor = EmeraldDark
+                            ),
+                            modifier = Modifier.testTag("edit_card_nfc_switch")
+                        )
+                    }
                 }
                 VaultCategory.KEY -> {
                     OutlinedTextField(
@@ -620,6 +679,7 @@ fun ItemEditSheet(
                             cardNumber = cardNumber,
                             cardExpiry = cardExpiry,
                             cardCvv = cardCvv,
+                            isNfcPayEnabled = isNfcPayEnabled,
                             keyType = keyType,
                             keyValue = keyValue,
                             isFavorite = isFavorite

@@ -13,6 +13,17 @@ import java.net.URI
 import java.util.Locale
 import java.util.UUID
 
+enum class ImportBrowserPreset(
+    val id: String,
+    val displayName: String,
+    val badgeLabel: String
+) {
+    CHROME("chrome", "Chrome", "Google Chrome CSV"),
+    EDGE("edge", "Edge", "Microsoft Edge CSV"),
+    FIREFOX("firefox", "Firefox", "Mozilla Firefox CSV"),
+    OPERA("opera", "Opera", "Opera CSV")
+}
+
 data class CsvImportPreview(
     val detectedFormat: String,
     val sourceFileName: String,
@@ -29,10 +40,10 @@ data class CsvImportCommitResult(
 
 /**
  * RFC-4180 compliant streaming CSV password importer supporting Google Chrome,
- * Chromium/Edge/Brave, Firefox, Safari, Bitwarden, 1Password, LastPass, and generic CSV files.
+ * Microsoft Edge, Mozilla Firefox, Opera / Opera GX, Bitwarden, 1Password, LastPass, and generic CSV files.
  *
- * Enforces strict size and row bounds to prevent memory exhaustion on untrusted files,
- * and computes normalized credential fingerprints for duplicate detection.
+ * Supports comma, semicolon, and tab delimiters, preserves Firefox `timePasswordChanged` metadata,
+ * normalizes 2FA TOTP seeds/URIs, and enforces strict size and row bounds.
  */
 object CsvPasswordImporter {
 
@@ -40,34 +51,43 @@ object CsvPasswordImporter {
     const val MAX_IMPORT_ROWS = 10_000
 
     private val TITLE_ALIASES = setOf(
-        "name", "title", "account", "service", "site", "sitename", "login_name", "label"
+        "name", "title", "account", "service", "site", "sitename", "login_name", "label", "display_name"
     )
     private val URL_ALIASES = setOf(
-        "url", "origin", "website", "webaddress", "login_uri", "uri", "hostname", "domain"
+        "url", "origin", "website", "webaddress", "login_uri", "uri", "hostname", "domain", "formactionorigin"
     )
     private val USERNAME_ALIASES = setOf(
-        "username", "user", "login_username", "email", "login", "user_name", "account_name", "userid"
+        "username", "user", "login_username", "email", "login", "user_name", "account_name", "userid", "httpusername"
     )
     private val PASSWORD_ALIASES = setOf(
-        "password", "pass", "login_password", "pw", "secret", "passcode"
+        "password", "pass", "login_password", "pw", "secret", "passcode", "httppassword"
     )
     private val NOTES_ALIASES = setOf(
         "note", "notes", "extra", "comment", "comments", "description", "memo"
     )
     private val TOTP_ALIASES = setOf(
-        "totp", "login_totp", "otp", "2fa", "totp_secret"
+        "totp", "login_totp", "otp", "2fa", "totp_secret", "otpauth"
     )
     private val CATEGORY_ALIASES = setOf(
         "type", "category", "grouping", "folder"
+    )
+    private val PASSWORD_UPDATED_ALIASES = setOf(
+        "timepasswordchanged", "password_updated_at", "passwordchanged"
     )
 
     fun parseFromUri(
         context: Context,
         uri: Uri,
-        existingItems: List<VaultItem> = emptyList()
+        existingItems: List<VaultItem> = emptyList(),
+        browserHint: ImportBrowserPreset? = null
     ): Result<CsvImportPreview> {
         return try {
-            var fileName = "chrome_passwords.csv"
+            var fileName = when (browserHint) {
+                ImportBrowserPreset.EDGE -> "edge_passwords.csv"
+                ImportBrowserPreset.FIREFOX -> "firefox_logins.csv"
+                ImportBrowserPreset.OPERA -> "opera_passwords.csv"
+                ImportBrowserPreset.CHROME, null -> "chrome_passwords.csv"
+            }
             var fileSize = -1L
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
@@ -85,7 +105,7 @@ object CsvPasswordImporter {
             val stream = context.contentResolver.openInputStream(uri)
                 ?: return Result.failure(IllegalArgumentException("Unable to open selected CSV file."))
             stream.use { input ->
-                parseFromInputStream(input, fileName, existingItems)
+                parseFromInputStream(input, fileName, existingItems, browserHint)
             }
         } catch (e: Exception) {
             Result.failure(IllegalArgumentException("Failed to read CSV file: ${e.message}", e))
@@ -95,12 +115,13 @@ object CsvPasswordImporter {
     fun parseFromInputStream(
         inputStream: InputStream,
         sourceFileName: String = "passwords.csv",
-        existingItems: List<VaultItem> = emptyList()
+        existingItems: List<VaultItem> = emptyList(),
+        browserHint: ImportBrowserPreset? = null
     ): Result<CsvImportPreview> {
         return try {
             val bounded = BoundedInputStream(inputStream, MAX_CSV_BYTES + 1)
             BufferedReader(InputStreamReader(bounded, Charsets.UTF_8)).use { reader ->
-                parseFromReader(reader, sourceFileName, existingItems)
+                parseFromReader(reader, sourceFileName, existingItems, browserHint)
             }
         } catch (e: Exception) {
             Result.failure(IllegalArgumentException("Failed to parse CSV stream: ${e.message}", e))
@@ -110,22 +131,32 @@ object CsvPasswordImporter {
     fun parseFromString(
         csvContent: String,
         sourceFileName: String = "pasted_passwords.csv",
-        existingItems: List<VaultItem> = emptyList()
+        existingItems: List<VaultItem> = emptyList(),
+        browserHint: ImportBrowserPreset? = null
     ): Result<CsvImportPreview> {
         if (csvContent.toByteArray(Charsets.UTF_8).size > MAX_CSV_BYTES) {
             return Result.failure(IllegalArgumentException("CSV content exceeds 10 MB limit."))
         }
         return StringReader(csvContent).use { reader ->
-            parseFromReader(reader, sourceFileName, existingItems)
+            parseFromReader(reader, sourceFileName, existingItems, browserHint)
         }
     }
 
     fun parseFromReader(
         reader: Reader,
         sourceFileName: String = "passwords.csv",
-        existingItems: List<VaultItem> = emptyList()
+        existingItems: List<VaultItem> = emptyList(),
+        browserHint: ImportBrowserPreset? = null
     ): Result<CsvImportPreview> {
-        val rows = parseRfc4180Rows(reader, MAX_IMPORT_ROWS + 1)
+        val buffered = if (reader is BufferedReader) reader else BufferedReader(reader)
+        val rawContent = buffered.readText()
+        if (rawContent.isBlank()) {
+            return Result.failure(IllegalArgumentException("The CSV file is empty."))
+        }
+        val delimiter = detectDelimiter(rawContent)
+        val rows = StringReader(rawContent).use { sr ->
+            parseRfc4180Rows(sr, MAX_IMPORT_ROWS + 1, delimiter)
+        }
         if (rows.isEmpty()) {
             return Result.failure(IllegalArgumentException("The CSV file is empty."))
         }
@@ -142,20 +173,34 @@ object CsvPasswordImporter {
         val notesIdx = headerRow.indexOfFirst { it in NOTES_ALIASES }
         val totpIdx = headerRow.indexOfFirst { it in TOTP_ALIASES }
         val catIdx = headerRow.indexOfFirst { it in CATEGORY_ALIASES }
+        val updatedIdx = headerRow.indexOfFirst { it in PASSWORD_UPDATED_ALIASES }
 
         if (passIdx < 0 && userIdx < 0 && urlIdx < 0 && notesIdx < 0) {
             return Result.failure(
                 IllegalArgumentException(
-                    "Unrecognized CSV headers. Expected Google Chrome format (name, url, username, password, note)."
+                    "Unrecognized CSV headers. Expected Chrome, Edge, Firefox, or Opera export columns (url, username, password)."
                 )
             )
         }
 
-        val isChromeHeader = headerRow.containsAll(listOf("name", "url", "username", "password"))
+        val lowerName = sourceFileName.lowercase(Locale.US)
+        val isFirefoxHeader = headerRow.contains("httprealm") ||
+            headerRow.contains("formactionorigin") ||
+            headerRow.contains("timepasswordchanged") ||
+            headerRow.contains("timecreated")
+        val isBitwardenHeader = headerRow.contains("login_uri") || headerRow.contains("login_password")
+        val isChromiumHeader = headerRow.containsAll(listOf("name", "url", "username", "password")) ||
+            headerRow.containsAll(listOf("url", "username", "password"))
+
         val detectedFormat = when {
-            isChromeHeader -> "Google Chrome CSV"
-            headerRow.contains("login_uri") || headerRow.contains("login_password") -> "Bitwarden CSV"
-            headerRow.contains("httprealm") || headerRow.contains("formactionorigin") -> "Firefox CSV"
+            isFirefoxHeader -> ImportBrowserPreset.FIREFOX.badgeLabel
+            isBitwardenHeader -> "Bitwarden CSV"
+            lowerName.contains("edge") || lowerName.contains("msedge") -> ImportBrowserPreset.EDGE.badgeLabel
+            lowerName.contains("opera") -> ImportBrowserPreset.OPERA.badgeLabel
+            lowerName.contains("firefox") || lowerName == "logins.csv" -> ImportBrowserPreset.FIREFOX.badgeLabel
+            browserHint != null && isChromiumHeader -> browserHint.badgeLabel
+            headerRow.containsAll(listOf("name", "url", "username", "password")) -> ImportBrowserPreset.CHROME.badgeLabel
+            isChromiumHeader -> "Browser Password CSV"
             else -> "Standard CSV"
         }
 
@@ -180,8 +225,24 @@ object CsvPasswordImporter {
             val rawUsername = sanitizeSingleLine(row.getOrNull(userIdx).orEmpty())
             val rawPassword = sanitizeCredential(row.getOrNull(passIdx).orEmpty())
             val rawNotes = sanitizeMultiLine(row.getOrNull(notesIdx).orEmpty())
-            val rawTotp = sanitizeSingleLine(row.getOrNull(totpIdx).orEmpty())
+            val rawTotpInput = sanitizeSingleLine(row.getOrNull(totpIdx).orEmpty())
+            val normalizedTotp = if (rawTotpInput.isNotBlank()) {
+                TotpAuthenticatorService.toStorableValue(rawTotpInput).getOrDefault(rawTotpInput)
+            } else {
+                ""
+            }
             val rawCategory = sanitizeSingleLine(row.getOrNull(catIdx).orEmpty()).lowercase(Locale.US)
+            val parsedPasswordUpdatedAt = row.getOrNull(updatedIdx)
+                ?.trim()
+                ?.toLongOrNull()
+                ?.takeIf { it > 946684800000L && it <= now + 86_400_000L } // Valid epoch ms after year 2000
+                ?: now
+
+            // Skip browser-internal metadata rows (e.g. Firefox chrome://FirefoxAccounts sync tokens or about: pages)
+            if (rawUrl.startsWith("chrome://", ignoreCase = true) || rawUrl.startsWith("about:", ignoreCase = true)) {
+                skippedRows++
+                continue
+            }
 
             if (rawTitle.isEmpty() && rawUrl.isEmpty() && rawUsername.isEmpty() &&
                 rawPassword.isEmpty() && rawNotes.isEmpty()
@@ -216,8 +277,8 @@ object CsvPasswordImporter {
                 password = rawPassword,
                 url = rawUrl,
                 notes = rawNotes,
-                totpSecret = rawTotp,
-                passwordUpdatedAt = now,
+                totpSecret = normalizedTotp,
+                passwordUpdatedAt = parsedPasswordUpdatedAt,
                 pwnedBreachCount = if (resolvedCategory == VaultCategory.LOGIN && rawPassword.isNotEmpty()) -1 else 0,
                 createdAt = now,
                 updatedAt = now
@@ -250,6 +311,30 @@ object CsvPasswordImporter {
         )
     }
 
+    internal fun detectDelimiter(rawCsv: String): Char {
+        val firstLine = rawCsv.lineSequence().firstOrNull { it.isNotBlank() } ?: return ','
+        var inQuotes = false
+        var commaCount = 0
+        var semicolonCount = 0
+        var tabCount = 0
+        for (ch in firstLine) {
+            if (ch == '"') {
+                inQuotes = !inQuotes
+            } else if (!inQuotes) {
+                when (ch) {
+                    ',' -> commaCount++
+                    ';' -> semicolonCount++
+                    '\t' -> tabCount++
+                }
+            }
+        }
+        return when {
+            semicolonCount > commaCount && semicolonCount >= tabCount -> ';'
+            tabCount > commaCount && tabCount > semicolonCount -> '\t'
+            else -> ','
+        }
+    }
+
     fun fingerprintItem(item: VaultItem): String {
         val host = extractHostLabel(item.url).lowercase(Locale.US)
         val user = item.username.trim().lowercase(Locale.US)
@@ -272,9 +357,9 @@ object CsvPasswordImporter {
     }
 
     /**
-     * Stateful RFC-4180 parser supporting quoted commas, escaped quotes (""), and embedded newlines.
+     * Stateful RFC-4180 parser supporting quoted delimiters, escaped quotes (""), and embedded newlines.
      */
-    internal fun parseRfc4180Rows(reader: Reader, maxRows: Int): List<List<String>> {
+    internal fun parseRfc4180Rows(reader: Reader, maxRows: Int, delimiter: Char = ','): List<List<String>> {
         val rows = mutableListOf<List<String>>()
         var currentRow = mutableListOf<String>()
         val field = StringBuilder()
@@ -310,7 +395,7 @@ object CsvPasswordImporter {
                         }
                         prevCharWasQuote = false
                     }
-                    ',' -> {
+                    delimiter -> {
                         currentRow.add(field.toString())
                         field.setLength(0)
                         prevCharWasQuote = false

@@ -1,5 +1,6 @@
 package com.example.security
 
+import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -14,11 +15,15 @@ import kotlinx.coroutines.launch
  */
 class InactivityLockManager(
     private val scope: CoroutineScope,
+    private val appContext: Context? = null,
     private val onLockTriggered: () -> Unit
 ) {
 
     @Volatile
     private var lastInteractionTimestamp: Long = System.currentTimeMillis()
+
+    @Volatile
+    private var monitorStartedAtMillis: Long = 0L
 
     @Volatile
     private var isMonitoring: Boolean = false
@@ -57,7 +62,17 @@ class InactivityLockManager(
     fun startMonitoring() {
         if (isMonitoring) return
         isMonitoring = true
-        lastInteractionTimestamp = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        lastInteractionTimestamp = now
+        monitorStartedAtMillis = now
+        appContext?.let { ctx ->
+            TaskAnalyticsEngine.recordTaskStarted(
+                context = ctx,
+                taskType = TrackedTaskType.INACTIVITY_TIMER,
+                taskName = "Inactivity Auto-Lock Monitor",
+                timestampMillis = now
+            )
+        }
 
         monitorJob?.cancel()
         monitorJob = scope.launch(Dispatchers.Default) {
@@ -66,6 +81,15 @@ class InactivityLockManager(
                 val elapsed = System.currentTimeMillis() - lastInteractionTimestamp
                 if (elapsed >= timeoutDurationMillis) {
                     isMonitoring = false
+                    appContext?.let { ctx ->
+                        TaskAnalyticsEngine.recordTaskCompleted(
+                            context = ctx,
+                            taskType = TrackedTaskType.INACTIVITY_TIMER,
+                            taskName = "Inactivity Auto-Lock Monitor",
+                            durationMs = System.currentTimeMillis() - monitorStartedAtMillis,
+                            note = "Idle timeout triggered vault lock"
+                        )
+                    }
                     launch(Dispatchers.Main) {
                         onLockTriggered()
                     }
@@ -78,17 +102,32 @@ class InactivityLockManager(
     /**
      * Stops monitoring when the vault is already locked.
      */
-    fun stopMonitoring() {
+    fun stopMonitoring(stopReasonLabel: String = "Inactivity monitor stopped on vault lock") {
+        val wasMonitoring = isMonitoring
         isMonitoring = false
         monitorJob?.cancel()
         monitorJob = null
+        if (wasMonitoring) {
+            val elapsed = if (monitorStartedAtMillis > 0L) System.currentTimeMillis() - monitorStartedAtMillis else null
+            appContext?.let { ctx ->
+                TaskAnalyticsEngine.recordTaskStopped(
+                    context = ctx,
+                    taskType = TrackedTaskType.INACTIVITY_TIMER,
+                    taskName = "Inactivity Auto-Lock Monitor",
+                    stopReasonCode = TaskAnalyticsEngine.STOP_REASON_APP_CANCELLED,
+                    stopReasonLabel = stopReasonLabel,
+                    state = TaskLifecycleState.STOPPED,
+                    durationMs = elapsed
+                )
+            }
+        }
     }
 
     /**
      * Immediate force lock (e.g. when app is backgrounded or device screen turns off).
      */
     fun triggerImmediateLock() {
-        stopMonitoring()
+        stopMonitoring("Immediate force lock stopped inactivity timer")
         onLockTriggered()
     }
 }

@@ -1,5 +1,7 @@
 package com.example.ui.dialogs
 
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -26,8 +28,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.StickyNote2
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Contactless
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.HealthAndSafety
@@ -39,6 +45,7 @@ import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -75,6 +82,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -83,8 +91,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
 import com.example.data.VaultPartition
 import com.example.model.VaultCategory
+import com.example.nfc.NfcContactlessHelper
 import com.example.security.BiometricAuthHelper
 import com.example.security.BlackBoxSecurity
+import com.example.security.TaskAnalyticsSummary
+import com.example.security.TaskLifecycleState
+import com.example.security.TrackedTaskType
 import com.example.security.VoiceprintTemplate
 import com.example.ui.VaultUiState
 import com.example.ui.components.IncognitoKeyboardArea
@@ -92,6 +104,8 @@ import com.example.ui.components.PasswordStrengthBar
 import com.example.ui.components.SecurityBadge
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
+import com.example.ui.theme.BlackBoxMonoFont
+import com.example.ui.theme.BlackBoxPitch
 import com.example.ui.theme.BlackBoxSurface
 import com.example.ui.theme.BlackBoxSurfaceVariant
 import com.example.ui.theme.CrimsonAlert
@@ -102,6 +116,9 @@ import com.example.ui.theme.EmeraldNeon
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.widget.ConfidentialNotesWidgetProvider
+import java.text.DateFormat
+import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -113,6 +130,10 @@ fun SettingsDialog(
     onDisableVoiceBiometrics: (String, (Boolean) -> Unit) -> Unit = { _, cb -> cb(false) },
     onChangeMasterPassword: (String, String, (Boolean) -> Unit) -> Unit,
     onSetAutoLockTimeout: (Int) -> Unit = {},
+    onToggleBackgroundGuard: (Boolean) -> Unit = {},
+    onRunBackgroundMaintenance: () -> Unit = {},
+    onClearTaskAnalytics: () -> Unit = {},
+    onRefreshNfcStatus: () -> Unit = {},
     onSetupDuressPin: (String, Boolean) -> Unit = { _, _ -> },
     onRemoveDuressPin: () -> Unit = {},
     onOpenSecurityHealth: () -> Unit = {},
@@ -136,9 +157,12 @@ fun SettingsDialog(
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                isAutofillServiceActive =
-                    context.getSystemService(AutofillManager::class.java)?.hasEnabledAutofillServices() == true
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    isAutofillServiceActive =
+                        context.getSystemService(AutofillManager::class.java)?.hasEnabledAutofillServices() == true
+                }
+                onRefreshNfcStatus()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -704,6 +728,321 @@ fun SettingsDialog(
                 }
                 Spacer(modifier = Modifier.height(14.dp))
             }
+
+            // Pay with NFC (Contactless HCE) Card
+            val nfcStatus = uiState.nfcHardwareStatus
+            val nfcBadgeText = when {
+                !nfcStatus.hasNfcHardware -> "NO NFC HARDWARE"
+                !nfcStatus.isNfcEnabled -> "NFC OFF"
+                nfcStatus.isDefaultPaymentService -> "DEFAULT TAP & PAY"
+                else -> "HCE READY"
+            }
+            val nfcAccent = when {
+                !nfcStatus.hasNfcHardware -> TextSecondary
+                !nfcStatus.isNfcEnabled -> AmberWarning
+                nfcStatus.isDefaultPaymentService -> EmeraldNeon
+                else -> CyanIce
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(BlackBoxSurfaceVariant)
+                    .border(
+                        1.dp,
+                        nfcAccent.copy(alpha = 0.45f),
+                        RoundedCornerShape(10.dp)
+                    )
+                    .padding(16.dp)
+                    .testTag("settings_nfc_card")
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Contactless,
+                                contentDescription = stringResource(R.string.nfc_pay_cta),
+                                tint = nfcAccent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "${stringResource(R.string.nfc_pay_title)} (CONTACTLESS)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextPrimary
+                            )
+                        }
+                        SecurityBadge(text = nfcBadgeText, color = nfcAccent)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(R.string.nfc_pay_advantage_summary),
+                        fontSize = 11.sp,
+                        color = TextMuted,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { NfcContactlessHelper.openNfcSettings(context) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("settings_nfc_toggle_button")
+                        ) {
+                            Text(
+                                text = "NFC Settings",
+                                fontSize = 12.sp,
+                                color = CyanIce,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Button(
+                            onClick = { NfcContactlessHelper.openTapAndPayDefaultSettings(context) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BlackBoxSurface,
+                                contentColor = EmeraldNeon
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .border(1.dp, EmeraldNeon.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                                .testTag("settings_tap_and_pay_button")
+                        ) {
+                            Text(
+                                text = "Tap & Pay Default",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Silent Background Vault Guard Card (JobScheduler, zero notifications, low RAM)
+            val bgStatus = uiState.backgroundGuardStatus
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(BlackBoxSurfaceVariant)
+                    .border(
+                        1.dp,
+                        if (bgStatus.isEnabled) EmeraldNeon.copy(alpha = 0.45f) else BlackBoxBorder,
+                        RoundedCornerShape(10.dp)
+                    )
+                    .padding(16.dp)
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = null,
+                                tint = if (bgStatus.isEnabled) EmeraldNeon else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = stringResource(R.string.bg_guard_title),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextPrimary
+                            )
+                        }
+                        Switch(
+                            checked = bgStatus.isEnabled,
+                            onCheckedChange = onToggleBackgroundGuard,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = EmeraldNeon,
+                                checkedTrackColor = EmeraldDark
+                            ),
+                            modifier = Modifier.testTag("background_guard_switch")
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = stringResource(R.string.bg_guard_desc),
+                        fontSize = 11.sp,
+                        color = TextMuted,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val lastSweepText = bgStatus.lastRunAtMillis?.let { ts ->
+                        "Last silent sweep: ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(ts))} (${bgStatus.lastCleanedItemsCount} purged)"
+                    } ?: if (bgStatus.isJobScheduled) {
+                        "OS JobScheduler armed • Battery-friendly idle batching"
+                    } else {
+                        "Silent sweep ready • Zero persistent RAM footprint"
+                    }
+                    Text(
+                        text = lastSweepText,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (bgStatus.isEnabled) CyanIce else TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = onRunBackgroundMaintenance,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("run_background_sweep_button")
+                    ) {
+                        Text(
+                            text = "Run Silent Sweep Now",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = EmeraldNeon
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // On-Device Task Execution & Stop-Tracking Analytics Card
+            TaskExecutionAnalyticsCard(
+                analytics = uiState.taskAnalytics,
+                onClear = onClearTaskAnalytics
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Confidential Notes Vault Home Screen Widget Card
+            val activeWidgetCount = remember(context) {
+                ConfidentialNotesWidgetProvider.getActiveWidgetIds(context).size
+            }
+            var widgetPinNotice by remember { mutableStateOf<String?>(null) }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(BlackBoxSurfaceVariant)
+                    .border(
+                        1.dp,
+                        if (activeWidgetCount > 0) EmeraldNeon.copy(alpha = 0.45f) else BlackBoxBorder,
+                        RoundedCornerShape(10.dp)
+                    )
+                    .padding(16.dp)
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.StickyNote2,
+                                contentDescription = null,
+                                tint = AmberWarning,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "CONFIDENTIAL NOTES WIDGET",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextPrimary
+                            )
+                        }
+                        SecurityBadge(
+                            text = if (activeWidgetCount > 0) "$activeWidgetCount PINNED" else "HOME SCREEN",
+                            color = if (activeWidgetCount > 0) EmeraldNeon else AmberWarning
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Pin a Confidential Notes Vault widget to your home screen. Encrypted notes never touch disk cache—locked state shows only sealed note count, while unlocked state offers Masked/Peek view and 1-tap Lock.",
+                        fontSize = 11.sp,
+                        color = TextMuted,
+                        lineHeight = 16.sp
+                    )
+                    if (widgetPinNotice != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = widgetPinNotice!!,
+                            fontSize = 11.sp,
+                            color = CyanIce
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                val manager = AppWidgetManager.getInstance(context)
+                                val provider = ComponentName(context, ConfidentialNotesWidgetProvider::class.java)
+                                if (manager.isRequestPinAppWidgetSupported) {
+                                    val requested = manager.requestPinAppWidget(provider, null, null)
+                                    widgetPinNotice = if (requested) {
+                                        "Launcher prompt opened to add Confidential Notes Vault widget."
+                                    } else {
+                                        "Long-press your home screen -> Widgets -> The Black-Box to place it."
+                                    }
+                                } else {
+                                    widgetPinNotice = "Long-press your home screen -> Widgets -> Confidential Notes Vault."
+                                }
+                            } else {
+                                widgetPinNotice = "Long-press your home screen -> Widgets -> Confidential Notes Vault."
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = EmeraldNeon,
+                            contentColor = Color(0xFF003816)
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("pin_notes_widget_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Widgets,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Pin Notes Widget to Home Screen",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Privacy Policy & Data Safety Disclosure Card
             Box(
@@ -1274,6 +1613,291 @@ fun SettingsDialog(
             },
             containerColor = BlackBoxSurfaceVariant,
             shape = RoundedCornerShape(12.dp)
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TaskExecutionAnalyticsCard(
+    analytics: TaskAnalyticsSummary,
+    onClear: () -> Unit
+) {
+    val hasStops = analytics.stoppedTasksCount > 0 || analytics.stoppedTaskTypes.isNotEmpty()
+    val borderColor = when {
+        analytics.osTerminatedCount > 0 -> CrimsonAlert.copy(alpha = 0.5f)
+        hasStops -> AmberWarning.copy(alpha = 0.45f)
+        else -> BlackBoxBorder
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(BlackBoxSurfaceVariant)
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .padding(16.dp)
+            .testTag("task_analytics_card")
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Analytics,
+                        contentDescription = "Task Stop Analytics",
+                        tint = if (hasStops) AmberWarning else CyanIce,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "TASK STOP & LIFECYCLE ANALYTICS",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = BlackBoxMonoFont,
+                        color = TextPrimary
+                    )
+                }
+                if (analytics.recentEvents.isNotEmpty()) {
+                    IconButton(
+                        onClick = onClear,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("clear_task_analytics_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteSweep,
+                            contentDescription = "Clear Task Analytics",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Local zero-PII engine tracking whether background jobs, timers, scans, and app tasks are active, completed, or stopped by the OS or user.",
+                fontSize = 11.sp,
+                color = TextMuted,
+                lineHeight = 16.sp
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 3 Telemetry Metric Counters
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AnalyticsCounterPill(
+                    label = "ACTIVE",
+                    value = analytics.activeTasksCount,
+                    accent = EmeraldNeon,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("task_analytics_active_count")
+                )
+                AnalyticsCounterPill(
+                    label = "DONE",
+                    value = analytics.completedTasksCount,
+                    accent = CyanIce,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("task_analytics_completed_count")
+                )
+                AnalyticsCounterPill(
+                    label = "STOPPED",
+                    value = analytics.stoppedTasksCount,
+                    accent = if (analytics.stoppedTasksCount > 0) AmberWarning else TextSecondary,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("task_analytics_stopped_count")
+                )
+            }
+
+            // Last Stopped Task Diagnostic Banner
+            analytics.lastStoppedEvent?.let { stopped ->
+                Spacer(modifier = Modifier.height(10.dp))
+                val stoppedAccent = if (stopped.state == TaskLifecycleState.OS_TERMINATED) CrimsonAlert else AmberWarning
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(BlackBoxPitch)
+                        .border(1.dp, stoppedAccent.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "LAST STOPPED: ${stopped.taskName.uppercase()}",
+                            fontSize = 10.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            fontWeight = FontWeight.Bold,
+                            color = stoppedAccent,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(stopped.timestampMillis)),
+                            fontSize = 10.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            color = TextMuted
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = stopped.stopReasonLabel ?: stopped.state.name,
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+                }
+            }
+
+            // Per-Task Current State Matrix
+            if (analytics.taskStatusByType.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    TrackedTaskType.entries.forEach { taskType ->
+                        val state = analytics.taskStatusByType[taskType] ?: return@forEach
+                        val stateColor = when (state) {
+                            TaskLifecycleState.STARTED -> EmeraldNeon
+                            TaskLifecycleState.COMPLETED -> CyanIce
+                            TaskLifecycleState.STOPPED,
+                            TaskLifecycleState.CANCELLED -> AmberWarning
+                            TaskLifecycleState.OS_TERMINATED,
+                            TaskLifecycleState.FAILED -> CrimsonAlert
+                        }
+                        val stateLabel = when (state) {
+                            TaskLifecycleState.STARTED -> "RUN"
+                            TaskLifecycleState.COMPLETED -> "OK"
+                            TaskLifecycleState.STOPPED -> "STOPPED"
+                            TaskLifecycleState.CANCELLED -> "CANCEL"
+                            TaskLifecycleState.OS_TERMINATED -> "OS_STOP"
+                            TaskLifecycleState.FAILED -> "ERR"
+                        }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(BlackBoxSurface)
+                                .border(1.dp, stateColor.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${taskType.shortTag}: ",
+                                fontSize = 10.sp,
+                                fontFamily = BlackBoxMonoFont,
+                                color = TextMuted
+                            )
+                            Text(
+                                text = stateLabel,
+                                fontSize = 10.sp,
+                                fontFamily = BlackBoxMonoFont,
+                                fontWeight = FontWeight.Bold,
+                                color = stateColor
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Recent Task Events Log (top 5)
+            if (analytics.recentEvents.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "RECENT TASK TELEMETRY (${analytics.recentEvents.size})",
+                    fontSize = 10.sp,
+                    fontFamily = BlackBoxMonoFont,
+                    color = TextMuted,
+                    letterSpacing = 0.8.sp
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                analytics.recentEvents.take(5).forEach { ev ->
+                    val evColor = when (ev.state) {
+                        TaskLifecycleState.STARTED -> EmeraldNeon
+                        TaskLifecycleState.COMPLETED -> CyanIce
+                        TaskLifecycleState.STOPPED,
+                        TaskLifecycleState.CANCELLED -> AmberWarning
+                        TaskLifecycleState.OS_TERMINATED,
+                        TaskLifecycleState.FAILED -> CrimsonAlert
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "[${ev.state.name}] ${ev.taskName}",
+                            fontSize = 10.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            color = evColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        val timeText = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(ev.timestampMillis))
+                        val durText = ev.durationMs?.let { " • ${it}ms" } ?: ""
+                        Text(
+                            text = "$timeText$durText",
+                            fontSize = 10.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            color = TextMuted
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnalyticsCounterPill(
+    label: String,
+    value: Int,
+    accent: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(BlackBoxSurface)
+            .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+            .padding(vertical = 8.dp, horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "$value",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = BlackBoxMonoFont,
+            color = accent
+        )
+        Text(
+            text = label,
+            fontSize = 9.sp,
+            fontFamily = BlackBoxMonoFont,
+            color = TextMuted,
+            letterSpacing = 0.6.sp
         )
     }
 }

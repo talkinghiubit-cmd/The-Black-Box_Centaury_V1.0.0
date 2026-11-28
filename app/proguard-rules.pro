@@ -16,6 +16,10 @@
 -keep class com.example.security.SnapshotPackage { *; }
 -keep class com.example.security.EncryptedShareCapsule { *; }
 -keep class com.example.security.DecryptedSharedItem { *; }
+-keep class com.example.security.BlackBoxVaultMaintenanceJobService { *; }
+-keep class com.example.nfc.** { *; }
+-keep class com.example.widget.** { *; }
+-keep class com.example.BlackBoxApplication { *; }
 
 # AndroidX Room Database & Generated Implementations
 -keep class * extends androidx.room.RoomDatabase { *; }

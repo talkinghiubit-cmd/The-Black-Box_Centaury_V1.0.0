@@ -161,6 +161,23 @@ object OfflineHibpStore {
         }
     }
 
+    fun pruneStaleCache(context: Context, maxAgeMs: Long = 30L * 24L * 60L * 60L * 1000L): Int {
+        synchronized(cacheLock) {
+            val dir = getCacheDir(context)
+            val now = System.currentTimeMillis()
+            var removed = 0
+            dir.listFiles()?.forEach { file ->
+                if (!file.isFile) return@forEach
+                val isOrphanTmp = file.name.endsWith(".tmp")
+                val isStaleRange = file.name.endsWith(".range") && (now - file.lastModified()) > maxAgeMs
+                if ((isOrphanTmp || isStaleRange) && file.delete()) {
+                    removed++
+                }
+            }
+            return removed
+        }
+    }
+
     suspend fun importFromUri(context: Context, uri: Uri): Result<OfflineHibpImportResult> =
         withContext(Dispatchers.IO) {
             try {

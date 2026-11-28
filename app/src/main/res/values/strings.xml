@@ -49,4 +49,23 @@
     <string name="totp_verify_input_label">Enter 6 or 8-digit code to validate</string>
     <string name="totp_verify_cta">Validate</string>
     <string name="totp_copy_uri_cta">Copy URI</string>
+
+    <!-- Confidential Notes Vault Widget -->
+    <string name="widget_confidential_notes_title">Confidential Notes Vault</string>
+    <string name="widget_confidential_notes_header">CONFIDENTIAL NOTES VAULT</string>
+    <string name="widget_confidential_notes_desc">Encrypted confidential notes status &amp; zero-disk quick unlock shortcut.</string>
+
+    <!-- Silent Background Guard -->
+    <string name="bg_guard_title">SILENT BACKGROUND VAULT GUARD</string>
+    <string name="bg_guard_desc">Runs silent, zero-notification OS JobScheduler sweeps to purge orphaned temp files, prune stale caches, and enforce RAM lock TTLs with minimal battery &amp; memory.</string>
+
+    <!-- Pay with NFC (Contactless Payments) -->
+    <string name="nfc_pay_title">PAY WITH NFC</string>
+    <string name="nfc_pay_cta">Pay with NFC</string>
+    <string name="nfc_pay_disarm_cta">Disarm NFC</string>
+    <string name="nfc_pay_advantage_summary">Key advantage: the ability to pay contactlessly at tap-to-pay NFC terminals directly from your encrypted vault.</string>
+    <string name="nfc_hce_service_desc">The Black-Box Pay with NFC (Contactless Vault Card)</string>
+    <string name="nfc_hce_aid_group_desc">Contactless payment cards — pay contactlessly via NFC HCE</string>
+    <string name="privacy_nfc_title">5. NFC Contactless Payments (Pay with NFC)</string>
+    <string name="privacy_nfc_body">When you tap Pay with NFC on a stored card, your device uses Android Host Card Emulation (HCE) so the key advantage is the ability to pay contactlessly while keeping card numbers encrypted at rest. Ephemeral contactless session tokens live only in RAM and auto-expire after 60 seconds or on vault lock.</string>
 </resources>

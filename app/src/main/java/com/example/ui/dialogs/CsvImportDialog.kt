@@ -8,6 +8,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,6 +36,8 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
@@ -59,9 +63,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.security.BlackBoxSecurity
 import com.example.security.CsvImportPreview
-import com.example.ui.components.IncognitoKeyboardArea
 import com.example.security.CsvPasswordImporter
+import com.example.security.ImportBrowserPreset
 import com.example.ui.components.CategoryIcon
+import com.example.ui.components.IncognitoKeyboardArea
 import com.example.ui.components.SecurityBadge
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
@@ -76,18 +81,19 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CsvImportDialog(
     preview: CsvImportPreview?,
     isImporting: Boolean,
-    onInspectCsvUri: (Uri) -> Unit,
-    onInspectCsvText: (String) -> Unit,
+    onInspectCsvUri: (Uri, ImportBrowserPreset) -> Unit,
+    onInspectCsvText: (String, ImportBrowserPreset) -> Unit,
     onCommitImport: (Boolean) -> Unit,
     onDismissPreview: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var selectedBrowser by remember { mutableStateOf(ImportBrowserPreset.CHROME) }
     var pastedCsv by remember { mutableStateOf("") }
     var skipDuplicates by remember { mutableStateOf(true) }
 
@@ -95,7 +101,7 @@ fun CsvImportDialog(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            onInspectCsvUri(uri)
+            onInspectCsvUri(uri, selectedBrowser)
         }
     }
 
@@ -141,14 +147,14 @@ fun CsvImportDialog(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Text(
-                            text = "CHROME & CSV VAULT IMPORT",
+                            text = "BROWSER & CSV VAULT IMPORT",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace,
                             color = TextPrimary
                         )
                         Text(
-                            text = "AES-256-GCM on-device migration",
+                            text = "Chrome • Edge • Firefox • Opera (AES-256-GCM)",
                             fontSize = 11.sp,
                             color = TextMuted
                         )
@@ -172,7 +178,77 @@ fun CsvImportDialog(
             Spacer(modifier = Modifier.height(16.dp))
 
             if (preview == null) {
-                // Step 1: Select Chrome / CSV file or paste CSV
+                // Step 1: Choose browser preset (Chrome, Edge, Firefox, Opera) & select/paste CSV
+                Text(
+                    text = "SELECT SOURCE BROWSER",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = TextMuted
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ImportBrowserPreset.entries.forEach { preset ->
+                        FilterChip(
+                            selected = selectedBrowser == preset,
+                            onClick = { selectedBrowser = preset },
+                            label = {
+                                Text(
+                                    text = preset.displayName,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = EmeraldContainer,
+                                selectedLabelColor = EmeraldNeon,
+                                containerColor = BlackBoxSurfaceVariant,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                borderColor = BlackBoxBorder,
+                                selectedBorderColor = EmeraldNeon,
+                                enabled = true,
+                                selected = selectedBrowser == preset
+                            ),
+                            modifier = Modifier.testTag("browser_preset_${preset.id}")
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                val guideTitle = when (selectedBrowser) {
+                    ImportBrowserPreset.CHROME -> "GOOGLE CHROME EXPORT GUIDE"
+                    ImportBrowserPreset.EDGE -> "MICROSOFT EDGE EXPORT GUIDE"
+                    ImportBrowserPreset.FIREFOX -> "MOZILLA FIREFOX EXPORT GUIDE"
+                    ImportBrowserPreset.OPERA -> "OPERA / OPERA GX EXPORT GUIDE"
+                }
+                val guideSteps = when (selectedBrowser) {
+                    ImportBrowserPreset.CHROME ->
+                        "1. Open Google Chrome on Android or Desktop.\n" +
+                            "2. Go to Settings → Google Password Manager → Settings.\n" +
+                            "3. Tap Export passwords to save passwords.csv, then select it below."
+                    ImportBrowserPreset.EDGE ->
+                        "1. Open Microsoft Edge on Android or Desktop.\n" +
+                            "2. Go to Settings → Profiles → Passwords → ⋯ (More actions).\n" +
+                            "3. Tap Export passwords to save the .csv file, then select it below."
+                    ImportBrowserPreset.FIREFOX ->
+                        "1. Open Firefox on Desktop (about:logins) or Mobile Passwords.\n" +
+                            "2. Tap the ⋯ menu → Export Logins… and confirm.\n" +
+                            "3. Select logins.csv below (comma & semicolon formats supported)."
+                    ImportBrowserPreset.OPERA ->
+                        "1. Open Opera or Opera GX.\n" +
+                            "2. Go to Settings → Privacy & Security → Autofill → Passwords.\n" +
+                            "3. Open the ⋮ menu → Export passwords (.csv), then select it below."
+                }
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -191,7 +267,7 @@ fun CsvImportDialog(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "GOOGLE CHROME EXPORT GUIDE",
+                                text = guideTitle,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
@@ -200,9 +276,7 @@ fun CsvImportDialog(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "1. Open Google Chrome on Android or Desktop.\n" +
-                                "2. Go to Settings → Google Password Manager → Settings.\n" +
-                                "3. Tap Export passwords to save a .csv file, then select it below.",
+                            text = guideSteps,
                             fontSize = 12.sp,
                             color = TextSecondary,
                             lineHeight = 17.sp
@@ -241,7 +315,7 @@ fun CsvImportDialog(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "SELECT CHROME OR .CSV FILE",
+                        text = "SELECT ${selectedBrowser.displayName.uppercase()} .CSV FILE",
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp
@@ -281,7 +355,7 @@ fun CsvImportDialog(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 OutlinedButton(
-                    onClick = { onInspectCsvText(pastedCsv) },
+                    onClick = { onInspectCsvText(pastedCsv, selectedBrowser) },
                     enabled = pastedCsv.trim().isNotEmpty(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanIce),
                     border = androidx.compose.foundation.BorderStroke(1.dp, CyanIce.copy(alpha = 0.5f)),
@@ -292,7 +366,7 @@ fun CsvImportDialog(
                         .testTag("parse_pasted_csv_button")
                 ) {
                     Text(
-                        text = "PARSE & PREVIEW CSV DATA",
+                        text = "PARSE & PREVIEW ${selectedBrowser.displayName.uppercase()} CSV",
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp

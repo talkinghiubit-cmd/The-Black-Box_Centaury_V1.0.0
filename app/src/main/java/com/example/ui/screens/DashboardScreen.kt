@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +28,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Contactless
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dangerous
 import androidx.compose.material.icons.filled.FileDownload
@@ -34,7 +38,6 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -44,7 +47,6 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -65,11 +67,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,15 +88,21 @@ import com.example.model.VaultItem
 import com.example.security.TotpAuthenticatorService
 import com.example.ui.VaultUiState
 import com.example.ui.components.CategoryIcon
+import com.example.ui.components.CyberVaultBackdrop
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.BlackBoxBorder
+import com.example.ui.theme.BlackBoxBorderSubtle
+import com.example.ui.theme.BlackBoxDisplayFont
+import com.example.ui.theme.BlackBoxMonoFont
 import com.example.ui.theme.BlackBoxPitch
 import com.example.ui.theme.BlackBoxSurface
+import com.example.ui.theme.BlackBoxSurfaceElevated
 import com.example.ui.theme.BlackBoxSurfaceVariant
 import com.example.ui.theme.CrimsonAlert
 import com.example.ui.theme.CyanIce
 import com.example.ui.theme.EmeraldContainer
 import com.example.ui.theme.EmeraldNeon
+import com.example.ui.theme.IndigoCipher
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -132,28 +146,57 @@ fun DashboardScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(BlackBoxSurfaceElevated)
+                                .border(1.dp, EmeraldNeon.copy(alpha = 0.38f), RoundedCornerShape(10.dp))
+                                .padding(4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_blackbox_icon),
+                                contentDescription = "The Black-Box Emblem",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
                             Text(
                                 text = stringResource(R.string.app_brand_upper),
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                letterSpacing = 1.sp,
-                                color = TextPrimary
+                                fontFamily = BlackBoxDisplayFont,
+                                letterSpacing = 0.8.sp,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(EmeraldNeon)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = stringResource(R.string.app_tagline),
+                                    fontSize = 10.sp,
+                                    color = EmeraldNeon,
+                                    fontFamily = BlackBoxMonoFont,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
-                        Text(
-                            text = stringResource(R.string.app_tagline),
-                            fontSize = 10.sp,
-                            color = EmeraldNeon,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Medium
-                        )
                     }
                 },
                 actions = {
-                    // Security Health & Breach Audit Icon with Badge (counts breached, weak, and duplicate logins)
                     IconButton(
                         onClick = onOpenSecurityHealth,
                         modifier = Modifier.testTag("open_health_button")
@@ -190,19 +233,17 @@ fun DashboardScreen(
                         }
                     }
 
-                    // Import from Google Chrome or .CSV
                     IconButton(
                         onClick = onOpenCsvImport,
                         modifier = Modifier.testTag("open_csv_import_top_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.FileUpload,
-                            contentDescription = "Import Chrome or CSV Passwords",
+                            contentDescription = "Import Browser or CSV Passwords",
                             tint = CyanIce
                         )
                     }
 
-                    // Lock Vault immediately
                     IconButton(
                         onClick = onLockVault,
                         modifier = Modifier.testTag("lock_vault_top_button")
@@ -224,7 +265,8 @@ fun DashboardScreen(
             FloatingActionButton(
                 onClick = onCreateNewItem,
                 containerColor = EmeraldNeon,
-                contentColor = Color(0xFF003816),
+                contentColor = Color(0xFF00331D),
+                shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.testTag("fab_create_item")
             ) {
                 Icon(
@@ -234,282 +276,315 @@ fun DashboardScreen(
             }
         }
     ) { innerPadding ->
-        Column(
+        CyberVaultBackdrop(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(BlackBoxPitch)
         ) {
-            // Quick Security Toolbar Strip
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                QuickToolButton(
-                    icon = Icons.Default.Key,
-                    label = "Generator",
-                    tint = CyanIce,
-                    onClick = onOpenGenerator,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_generator_button")
-                )
-                QuickToolButton(
-                    icon = Icons.Default.LockOpen,
-                    label = "Receive",
-                    tint = CyanIce,
-                    onClick = onOpenReceiveShare,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_receive_share_button")
-                )
-                QuickToolButton(
-                    icon = Icons.Default.FileDownload,
-                    label = "Backup",
-                    tint = EmeraldNeon,
-                    onClick = onOpenBackupExport,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_backup_button")
-                )
-                QuickToolButton(
-                    icon = Icons.Default.Settings,
-                    label = "Settings",
-                    tint = TextSecondary,
-                    onClick = onOpenSettings,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_settings_button")
-                )
-            }
-
-            // Inline Security Health Score Summary & Vulnerability Alert Card
-            if (uiState.healthReport.totalLogins > 0) {
-                DashboardHealthCard(
-                    report = uiState.healthReport,
-                    onClick = onOpenSecurityHealth,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                )
-            }
-
-            // Search Bar
-            OutlinedTextField(
-                value = uiState.searchQuery,
-                onValueChange = onSearchChanged,
-                placeholder = { Text("Search encrypted items...", color = TextMuted) },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
-                        tint = TextSecondary
-                    )
-                },
-                trailingIcon = {
-                    if (uiState.searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { onSearchChanged("") }) {
-                            Icon(
-                                imageVector = Icons.Default.Clear,
-                                contentDescription = "Clear",
-                                tint = TextSecondary
-                            )
-                        }
-                    }
-                },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = EmeraldNeon,
-                    unfocusedBorderColor = BlackBoxBorder,
-                    focusedContainerColor = BlackBoxSurface,
-                    unfocusedContainerColor = BlackBoxSurface,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
-                ),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .testTag("vault_search_input")
-            )
-
-            // Active Health Filter Banner (if filtering by vulnerable items)
-            if (uiState.activeHealthFilter != null) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Tactical Security Command Strip
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(BlackBoxSurfaceVariant)
-                        .border(1.dp, AmberWarning.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = "FILTER: ${uiState.activeHealthFilter} PASSWORDS (${uiState.filteredItems.size})",
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        color = AmberWarning
+                    QuickToolButton(
+                        icon = Icons.Default.Key,
+                        label = "Generator",
+                        tint = CyanIce,
+                        onClick = onOpenGenerator,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_generator_button")
                     )
-                    IconButton(onClick = onClearHealthFilter, modifier = Modifier.size(24.dp)) {
+                    QuickToolButton(
+                        icon = Icons.Default.LockOpen,
+                        label = "Receive",
+                        tint = IndigoCipher,
+                        onClick = onOpenReceiveShare,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_receive_share_button")
+                    )
+                    QuickToolButton(
+                        icon = Icons.Default.FileDownload,
+                        label = "Backup",
+                        tint = EmeraldNeon,
+                        onClick = onOpenBackupExport,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_backup_button")
+                    )
+                    QuickToolButton(
+                        icon = Icons.Default.Settings,
+                        label = "Settings",
+                        tint = TextSecondary,
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_settings_button")
+                    )
+                }
+
+                // Circular SecOps Posture Summary Card
+                if (uiState.healthReport.totalLogins > 0) {
+                    DashboardHealthCard(
+                        report = uiState.healthReport,
+                        onClick = onOpenSecurityHealth,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
+                }
+
+                // Search Bar
+                OutlinedTextField(
+                    value = uiState.searchQuery,
+                    onValueChange = onSearchChanged,
+                    placeholder = { Text("Search encrypted items, URLs, keys...", color = TextMuted) },
+                    leadingIcon = {
                         Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Clear filter",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(16.dp)
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search",
+                            tint = TextSecondary
                         )
-                    }
-                }
-            }
+                    },
+                    trailingIcon = {
+                        if (uiState.searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onSearchChanged("") }) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Clear",
+                                    tint = TextSecondary
+                                )
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = EmeraldNeon,
+                        unfocusedBorderColor = BlackBoxBorder,
+                        focusedContainerColor = BlackBoxSurface,
+                        unfocusedContainerColor = BlackBoxSurface,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .testTag("vault_search_input")
+                )
 
-            // Category & Favorite Chips
-            LazyRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                item {
-                    FilterChip(
-                        selected = uiState.selectedCategory == null && !uiState.showFavoritesOnly && uiState.activeHealthFilter == null,
-                        onClick = {
-                            if (uiState.showFavoritesOnly) onToggleFavoritesFilter()
-                            if (uiState.activeHealthFilter != null) onClearHealthFilter()
-                            onCategorySelected(null)
-                        },
-                        label = { Text("All (${uiState.decryptedItems.size})") },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = EmeraldContainer,
-                            selectedLabelColor = EmeraldNeon,
-                            containerColor = BlackBoxSurface,
-                            labelColor = TextSecondary
-                        ),
-                        border = FilterChipDefaults.filterChipBorder(
-                            borderColor = BlackBoxBorder,
-                            selectedBorderColor = EmeraldNeon,
-                            enabled = true,
-                            selected = uiState.selectedCategory == null && !uiState.showFavoritesOnly && uiState.activeHealthFilter == null
-                        ),
-                        modifier = Modifier.testTag("filter_all")
-                    )
-                }
-
-                item {
-                    FilterChip(
-                        selected = uiState.showFavoritesOnly,
-                        onClick = onToggleFavoritesFilter,
-                        leadingIcon = {
+                // Active Health Filter Banner
+                if (uiState.activeHealthFilter != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(BlackBoxSurfaceVariant)
+                            .border(1.dp, AmberWarning.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "FILTER: ${uiState.activeHealthFilter} PASSWORDS (${uiState.filteredItems.size})",
+                            fontSize = 11.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            fontWeight = FontWeight.Bold,
+                            color = AmberWarning
+                        )
+                        IconButton(onClick = onClearHealthFilter, modifier = Modifier.size(28.dp)) {
                             Icon(
-                                imageVector = if (uiState.showFavoritesOnly) Icons.Default.Star else Icons.Default.StarBorder,
-                                contentDescription = "Favorites",
-                                tint = if (uiState.showFavoritesOnly) AmberWarning else TextSecondary,
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Clear filter",
+                                tint = TextSecondary,
                                 modifier = Modifier.size(16.dp)
                             )
-                        },
-                        label = { Text("Favorites") },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AmberWarning.copy(alpha = 0.15f),
-                            selectedLabelColor = AmberWarning,
-                            containerColor = BlackBoxSurface,
-                            labelColor = TextSecondary
-                        ),
-                        border = FilterChipDefaults.filterChipBorder(
-                            borderColor = BlackBoxBorder,
-                            selectedBorderColor = AmberWarning,
-                            enabled = true,
-                            selected = uiState.showFavoritesOnly
-                        ),
-                        modifier = Modifier.testTag("filter_favorites")
-                    )
+                        }
+                    }
                 }
 
-                items(VaultCategory.entries.toTypedArray()) { cat ->
-                    val isSelected = uiState.selectedCategory == cat && !uiState.showFavoritesOnly && uiState.activeHealthFilter == null
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            if (uiState.showFavoritesOnly) onToggleFavoritesFilter()
-                            if (uiState.activeHealthFilter != null) onClearHealthFilter()
-                            onCategorySelected(if (isSelected) null else cat)
-                        },
-                        label = { Text(cat.displayName) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = EmeraldContainer,
-                            selectedLabelColor = EmeraldNeon,
-                            containerColor = BlackBoxSurface,
-                            labelColor = TextSecondary
-                        ),
-                        border = FilterChipDefaults.filterChipBorder(
-                            borderColor = BlackBoxBorder,
-                            selectedBorderColor = EmeraldNeon,
-                            enabled = true,
-                            selected = isSelected
-                        ),
-                        modifier = Modifier.testTag("filter_${cat.name.lowercase()}")
-                    )
-                }
-            }
-
-            // Items List
-            if (uiState.filteredItems.isEmpty()) {
-                Box(
+                // Category & Favorite Filter Rail
+                LazyRow(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Outlined.Lock,
-                            contentDescription = null,
-                            tint = TextMuted,
-                            modifier = Modifier.size(54.dp)
+                    item {
+                        val isAllSelected = uiState.selectedCategory == null &&
+                            !uiState.showFavoritesOnly &&
+                            uiState.activeHealthFilter == null
+                        FilterChip(
+                            selected = isAllSelected,
+                            onClick = {
+                                if (uiState.showFavoritesOnly) onToggleFavoritesFilter()
+                                if (uiState.activeHealthFilter != null) onClearHealthFilter()
+                                onCategorySelected(null)
+                            },
+                            label = {
+                                Text(
+                                    text = "All (${uiState.decryptedItems.size})",
+                                    fontFamily = BlackBoxMonoFont,
+                                    fontSize = 11.sp
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = EmeraldContainer,
+                                selectedLabelColor = EmeraldNeon,
+                                containerColor = BlackBoxSurface,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                borderColor = BlackBoxBorder,
+                                selectedBorderColor = EmeraldNeon,
+                                enabled = true,
+                                selected = isAllSelected
+                            ),
+                            modifier = Modifier.testTag("filter_all")
                         )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = if (uiState.decryptedItems.isEmpty()) "VAULT IS EMPTY" else "NO MATCHING RECORDS",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            color = TextSecondary
+                    }
+
+                    item {
+                        FilterChip(
+                            selected = uiState.showFavoritesOnly,
+                            onClick = onToggleFavoritesFilter,
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (uiState.showFavoritesOnly) Icons.Default.Star else Icons.Default.StarBorder,
+                                    contentDescription = "Favorites",
+                                    tint = if (uiState.showFavoritesOnly) AmberWarning else TextSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Favorites",
+                                    fontFamily = BlackBoxMonoFont,
+                                    fontSize = 11.sp
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = AmberWarning.copy(alpha = 0.15f),
+                                selectedLabelColor = AmberWarning,
+                                containerColor = BlackBoxSurface,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                borderColor = BlackBoxBorder,
+                                selectedBorderColor = AmberWarning,
+                                enabled = true,
+                                selected = uiState.showFavoritesOnly
+                            ),
+                            modifier = Modifier.testTag("filter_favorites")
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = if (uiState.decryptedItems.isEmpty())
-                                "Tap the + button to store your first encrypted password, note, card, or SSH key."
-                            else
-                                "Try clearing your search query or filters.",
-                            fontSize = 13.sp,
-                            color = TextMuted,
-                            modifier = Modifier.padding(horizontal = 24.dp),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    }
+
+                    items(VaultCategory.entries.toTypedArray()) { cat ->
+                        val isSelected = uiState.selectedCategory == cat &&
+                            !uiState.showFavoritesOnly &&
+                            uiState.activeHealthFilter == null
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = {
+                                if (uiState.showFavoritesOnly) onToggleFavoritesFilter()
+                                if (uiState.activeHealthFilter != null) onClearHealthFilter()
+                                onCategorySelected(if (isSelected) null else cat)
+                            },
+                            label = {
+                                Text(
+                                    text = cat.displayName,
+                                    fontFamily = BlackBoxMonoFont,
+                                    fontSize = 11.sp
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = EmeraldContainer,
+                                selectedLabelColor = EmeraldNeon,
+                                containerColor = BlackBoxSurface,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                borderColor = BlackBoxBorder,
+                                selectedBorderColor = EmeraldNeon,
+                                enabled = true,
+                                selected = isSelected
+                            ),
+                            modifier = Modifier.testTag("filter_${cat.name.lowercase()}")
                         )
                     }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 88.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(uiState.filteredItems, key = { it.id }) { item ->
-                        val isWeak = uiState.healthReport.weakItems.any { it.id == item.id }
-                        val isDuplicate = uiState.healthReport.reusedItems.any { it.id == item.id }
-                        VaultItemCard(
-                            item = item,
-                            totpSecondsRemaining = uiState.totpSecondsRemaining,
-                            isWeak = isWeak,
-                            isDuplicate = isDuplicate,
-                            onClick = { onItemClick(item) },
-                            onToggleFavorite = { onToggleFavorite(item.id) },
-                            onCopyUsername = { onCopyText("Username", item.username, false) },
-                            onCopyPassword = { onCopyText("Password", item.password, true) },
-                            onCopyTotp = { code -> onCopyText("2FA Code", code, true) }
-                        )
+
+                // Encrypted Vault List
+                if (uiState.filteredItems.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(BlackBoxSurface)
+                                    .border(1.dp, BlackBoxBorder, RoundedCornerShape(18.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Lock,
+                                    contentDescription = null,
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(34.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (uiState.decryptedItems.isEmpty()) "ENCLAVE IS EMPTY" else "NO MATCHING RECORDS",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = BlackBoxDisplayFont,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = if (uiState.decryptedItems.isEmpty())
+                                    "Tap + to encrypt a password, confidential note, card, or cryptographic key."
+                                else
+                                    "Adjust your search query or category filter.",
+                                fontSize = 13.sp,
+                                color = TextMuted,
+                                modifier = Modifier.padding(horizontal = 24.dp),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 92.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(uiState.filteredItems, key = { it.id }) { item ->
+                            val isWeak = uiState.healthReport.weakItems.any { it.id == item.id }
+                            val isDuplicate = uiState.healthReport.reusedItems.any { it.id == item.id }
+                            VaultItemCard(
+                                item = item,
+                                totpSecondsRemaining = uiState.totpSecondsRemaining,
+                                isWeak = isWeak,
+                                isDuplicate = isDuplicate,
+                                onClick = { onItemClick(item) },
+                                onToggleFavorite = { onToggleFavorite(item.id) },
+                                onCopyUsername = { onCopyText("Username", item.username, false) },
+                                onCopyPassword = { onCopyText("Password", item.password, true) },
+                                onCopyTotp = { code -> onCopyText("2FA Code", code, true) }
+                            )
+                        }
                     }
                 }
             }
@@ -533,9 +608,17 @@ private fun VaultItemCard(
     val totpToken = remember(item.totpSecret, totpSecondsRemaining) {
         if (item.totpSecret.isNotBlank()) TotpAuthenticatorService.generateToken(item.totpSecret) else null
     }
+    val statusAccent = when {
+        item.pwnedBreachCount > 0 -> CrimsonAlert
+        isWeak || isDuplicate -> AmberWarning
+        item.category == VaultCategory.NOTE -> CyanIce
+        item.category == VaultCategory.KEY -> IndigoCipher
+        item.category == VaultCategory.CARD -> AmberWarning
+        else -> EmeraldNeon
+    }
     val borderColor = when {
         item.pwnedBreachCount > 0 -> CrimsonAlert.copy(alpha = 0.65f)
-        isWeak || isDuplicate -> AmberWarning.copy(alpha = 0.45f)
+        isWeak || isDuplicate -> AmberWarning.copy(alpha = 0.48f)
         else -> BlackBoxBorder
     }
 
@@ -543,21 +626,28 @@ private fun VaultItemCard(
         modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .border(
-                1.dp,
-                borderColor,
-                RoundedCornerShape(10.dp)
-            )
+            .border(1.dp, borderColor, RoundedCornerShape(14.dp))
             .testTag("item_card_${item.id}"),
         colors = CardDefaults.cardColors(containerColor = BlackBoxSurfaceVariant),
-        shape = RoundedCornerShape(10.dp)
+        shape = RoundedCornerShape(14.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Subtle vertical category/posture bar
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(statusAccent.copy(alpha = 0.85f))
+            )
+
+            Spacer(modifier = Modifier.width(10.dp))
+
             CategoryIcon(category = item.category)
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -567,6 +657,7 @@ private fun VaultItemCard(
                     Text(
                         text = item.title,
                         fontSize = 15.sp,
+                        fontFamily = BlackBoxDisplayFont,
                         fontWeight = FontWeight.SemiBold,
                         color = TextPrimary,
                         maxLines = 1,
@@ -574,7 +665,6 @@ private fun VaultItemCard(
                         modifier = Modifier.weight(1f, fill = false)
                     )
 
-                    // Breached Warning Icon
                     if (item.pwnedBreachCount > 0) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Icon(
@@ -593,7 +683,6 @@ private fun VaultItemCard(
                         )
                     }
 
-                    // Attachments indicator
                     if (item.attachments.isNotEmpty()) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Icon(
@@ -619,48 +708,93 @@ private fun VaultItemCard(
                         text = subtitle,
                         fontSize = 12.sp,
                         color = TextSecondary,
-                        fontFamily = if (item.category == VaultCategory.KEY || item.category == VaultCategory.CARD) FontFamily.Monospace else FontFamily.Default,
+                        fontFamily = if (item.category == VaultCategory.KEY || item.category == VaultCategory.CARD) BlackBoxMonoFont else androidx.compose.ui.text.font.FontFamily.Default,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                // Inline TOTP Code chip
-                if (totpToken != null) {
-                    Spacer(modifier = Modifier.height(4.dp))
+                if (item.category == VaultCategory.CARD && item.isNfcPayEnabled) {
+                    Spacer(modifier = Modifier.height(5.dp))
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
+                            .clip(RoundedCornerShape(6.dp))
                             .background(BlackBoxSurface)
-                            .clickable { onCopyTotp(totpToken.code) }
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .border(1.dp, CyanIce.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                            .testTag("card_nfc_pill_${item.id}"),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "2FA: ${totpToken.formattedCode}",
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = CyanIce
+                        Icon(
+                            imageVector = Icons.Default.Contactless,
+                            contentDescription = stringResource(R.string.nfc_pay_cta),
+                            tint = CyanIce,
+                            modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "${totpToken.remainingSeconds}s",
-                            fontSize = 9.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = TextMuted
+                            text = stringResource(R.string.nfc_pay_cta),
+                            fontSize = 10.sp,
+                            fontFamily = BlackBoxMonoFont,
+                            fontWeight = FontWeight.SemiBold,
+                            color = CyanIce
                         )
+                    }
+                }
+
+                if (totpToken != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val progress = (totpToken.remainingSeconds.toFloat() / totpToken.periodSeconds.toFloat()).coerceIn(0f, 1f)
+                    val totpTint = if (totpToken.remainingSeconds <= 5) AmberWarning else CyanIce
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(BlackBoxSurface)
+                            .border(1.dp, totpTint.copy(alpha = 0.25f), RoundedCornerShape(6.dp))
+                            .clickable { onCopyTotp(totpToken.code) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "2FA ${totpToken.formattedCode}",
+                                fontSize = 11.sp,
+                                fontFamily = BlackBoxMonoFont,
+                                fontWeight = FontWeight.Bold,
+                                color = totpTint
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "${totpToken.remainingSeconds}s",
+                                fontSize = 9.sp,
+                                fontFamily = BlackBoxMonoFont,
+                                color = TextMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(84.dp)
+                                .height(2.dp)
+                                .clip(RoundedCornerShape(1.dp))
+                                .background(BlackBoxBorderSubtle)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(progress)
+                                    .fillMaxHeight()
+                                    .background(totpTint)
+                            )
+                        }
                     }
                 }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Quick Copy Username
                 if (item.username.isNotEmpty()) {
                     IconButton(
                         onClick = onCopyUsername,
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(40.dp)
                             .testTag("copy_username_${item.id}")
                     ) {
                         Icon(
@@ -672,12 +806,11 @@ private fun VaultItemCard(
                     }
                 }
 
-                // Quick Copy Password
                 if (item.password.isNotEmpty()) {
                     IconButton(
                         onClick = onCopyPassword,
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(40.dp)
                             .testTag("copy_password_${item.id}")
                     ) {
                         Icon(
@@ -689,11 +822,10 @@ private fun VaultItemCard(
                     }
                 }
 
-                // Favorite Star
                 IconButton(
                     onClick = onToggleFavorite,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(40.dp)
                         .testTag("toggle_favorite_${item.id}")
                 ) {
                     Icon(
@@ -710,7 +842,7 @@ private fun VaultItemCard(
 
 @Composable
 private fun QuickToolButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     label: String,
     tint: Color,
     onClick: () -> Unit,
@@ -719,9 +851,13 @@ private fun QuickToolButton(
     Row(
         modifier = modifier
             .height(48.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(BlackBoxSurface)
-            .border(1.dp, BlackBoxBorder, RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(BlackBoxSurfaceVariant, BlackBoxSurface)
+                )
+            )
+            .border(1.dp, BlackBoxBorder, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -733,11 +869,11 @@ private fun QuickToolButton(
             tint = tint,
             modifier = Modifier.size(16.dp)
         )
-        Spacer(modifier = Modifier.width(4.dp))
+        Spacer(modifier = Modifier.width(5.dp))
         Text(
             text = label,
             fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = BlackBoxMonoFont,
             fontWeight = FontWeight.Medium,
             color = TextPrimary,
             maxLines = 1,
@@ -762,18 +898,22 @@ private fun DashboardHealthCard(
     val summaryText = buildList {
         if (report.breachedCount > 0) add("${report.breachedCount} breached")
         if (report.weakCount > 0) add("${report.weakCount} weak")
-        if (report.reusedCount > 0) add("${report.reusedCount} duplicate")
+        if (report.reusedCount > 0) add("${report.reusedCount} reused")
         if (isEmpty() && report.expiredCount > 0) add("${report.expiredCount} expired")
         if (isEmpty()) add("${report.strongCount}/${report.totalLogins} strong & unique")
     }.joinToString(" • ")
 
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(BlackBoxSurface)
-            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(BlackBoxSurfaceVariant, BlackBoxSurface)
+                )
+            )
+            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
             .testTag("dashboard_health_card"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -783,53 +923,70 @@ private fun DashboardHealthCard(
             modifier = Modifier.weight(1f)
         ) {
             Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(accent.copy(alpha = 0.14f))
-                    .border(1.5.dp, accent, CircleShape),
+                modifier = Modifier.size(44.dp),
                 contentAlignment = Alignment.Center
             ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val stroke = 3.5.dp.toPx()
+                    drawArc(
+                        color = BlackBoxBorder,
+                        startAngle = 0f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        style = Stroke(width = stroke)
+                    )
+                    drawArc(
+                        color = accent,
+                        startAngle = -90f,
+                        sweepAngle = 360f * (report.overallScore.coerceIn(0, 100) / 100f),
+                        useCenter = false,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round)
+                    )
+                }
                 Text(
-                    text = "${report.overallScore}%",
-                    fontSize = 11.sp,
+                    text = "${report.overallScore}",
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BlackBoxMonoFont,
                     color = accent
                 )
             }
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(12.dp))
             Column {
                 Text(
                     text = when {
                         hasCritical -> "CRITICAL PASSWORD RISK"
-                        hasWarnings -> "SECURITY HEALTH ALERT"
-                        else -> "SECURITY HEALTH OPTIMAL"
+                        hasWarnings -> "POSTURE HARDENING ALERT"
+                        else -> "SECURITY POSTURE OPTIMAL"
                     },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BlackBoxMonoFont,
+                    letterSpacing = 0.5.sp,
                     color = accent
                 )
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = summaryText,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     color = TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
         }
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = "AUDIT",
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = BlackBoxMonoFont,
             color = accent,
             modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(accent.copy(alpha = 0.12f))
-                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(accent.copy(alpha = 0.14f))
+                .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 5.dp)
         )
     }
 }

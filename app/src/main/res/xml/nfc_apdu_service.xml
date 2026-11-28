@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:apduServiceBanner="@drawable/nfc_payment_banner"
+    android:description="@string/nfc_hce_service_desc"
+    android:requireDeviceUnlock="true">
+    <aid-group
+        android:category="payment"
+        android:description="@string/nfc_hce_aid_group_desc">
+        <!-- EMV Proximity Payment System Environment (2PAY.SYS.DDF01) -->
+        <aid-filter android:name="325041592E5359532E4444463031" />
+        <!-- Visa Contactless AID -->
+        <aid-filter android:name="A0000000031010" />
+        <!-- Mastercard Contactless AID -->
+        <aid-filter android:name="A0000000041010" />
+        <!-- American Express Contactless AID -->
+        <aid-filter android:name="A000000025010801" />
+        <!-- The Black-Box Tokenized Vault AID -->
+        <aid-filter android:name="F0424C41434B424F58" />
+    </aid-group>
+</host-apdu-service>
